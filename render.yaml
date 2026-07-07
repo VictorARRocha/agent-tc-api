@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: agent-tc-api
+    runtime: docker
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /health
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_BUCKET
+        sync: false
+      - key: SUPABASE_SCHEMA
+        value: public
+      - key: SUPABASE_TABLE_PREFIX
+        value: agent_tc_
