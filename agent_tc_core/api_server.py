@@ -46,9 +46,9 @@ class AgentTcApi:
         return HTTPStatus.NOT_FOUND, {"error": "not_found", "path": path}
 
     def route_post(self, path: str, body: dict[str, Any]) -> tuple[int, Any]:
-        if self.read_only:
-            return HTTPStatus.METHOD_NOT_ALLOWED, {"error": "read_only_api"}
         parts = _path_parts(path)
+        if self.read_only and parts != ["rerun-requests"]:
+            return HTTPStatus.METHOD_NOT_ALLOWED, {"error": "read_only_api"}
         if parts == ["analyze"]:
             return self._analyze(body)
         if parts == ["rerun-requests"]:

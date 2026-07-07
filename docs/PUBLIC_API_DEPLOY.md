@@ -98,8 +98,9 @@ O deploy publico deve usar `--read-only`.
 Isso bloqueia:
 
 - `POST /analyze`
-- `POST /rerun-requests`
 
 Os endpoints `GET` continuam funcionando para o dashboard.
 
-Se futuramente o dashboard precisar pedir reexecucao via API publica, devemos adicionar autenticacao antes de liberar POST.
+O endpoint `POST /rerun-requests` continua liberado para o dashboard solicitar rodagens ao JenkinsBridge.
+
+Se futuramente esse endpoint precisar ficar restrito por usuario, devemos adicionar autenticacao antes do insert.

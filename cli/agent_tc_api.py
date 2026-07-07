@@ -52,7 +52,7 @@ def main() -> int:
     parser.add_argument(
         "--read-only",
         action="store_true",
-        help="Bloqueia POST /analyze e POST /rerun-requests para deploy publico.",
+        help="Bloqueia POST /analyze para deploy publico, mas permite POST /rerun-requests.",
     )
     args = parser.parse_args()
 
