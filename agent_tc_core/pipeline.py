@@ -49,6 +49,12 @@ def run_shadow_pipeline(
             )
         )
 
-    payload = build_shadow_payload(context, failures, mds.hierarchy_rows())
+    total_executed = mds.project_variable_int("wpSomaCasosExecutados")
+    payload = build_shadow_payload(
+        context,
+        failures,
+        mds.hierarchy_rows(),
+        total_executed=total_executed,
+    )
     write_shadow_reports(report_dir, payload)
     return report_dir, payload

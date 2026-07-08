@@ -30,9 +30,17 @@ class SQLiteRepository:
 
     def initialize(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.connect() as conn:
+        conn = self.connect()
+        try:
             conn.executescript(SQLITE_SCHEMA.read_text(encoding="utf-8"))
+            try:
+                conn.execute("ALTER TABLE runs ADD COLUMN total_executed INTEGER")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
             self.seed_modules(conn)
+        finally:
+            conn.close()
 
     def connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -101,6 +109,7 @@ class SQLiteRepository:
                     "status": "analyzed",
                     "total_archives": len(payload.get("falhas") or []),
                     "total_occurrences": len(payload.get("falhas") or []),
+                    "total_executed": run.get("total_executed") if run.get("total_executed") is not None else run.get("total_analisados"),
                     "total_ai_groups": len(payload.get("agrupamentos_shadow") or payload.get("agrupamentos") or []),
                     "created_at": run.get("created_at") or now,
                     "updated_at": now,
@@ -601,6 +610,8 @@ def module_api_row(row: sqlite3.Row) -> dict[str, Any]:
 def run_api_row(row: sqlite3.Row) -> dict[str, Any]:
     data = dict(row)
     module_slug = data.get("module_slug") or SLUG_BY_MODULE_ID.get(data["module_id"]) or ""
+    total_executed = data.get("total_executed")
+    total_analisados = total_executed if total_executed is not None else data["total_occurrences"]
     return {
         **data,
         "id_rodagem": data["id"],
@@ -634,7 +645,7 @@ def run_api_row(row: sqlite3.Row) -> dict[str, Any]:
         "diagnostico_detalhado": None,
         "conclusao_geral": None,
         "total_compactados": data["total_archives"],
-        "total_analisados": data["total_occurrences"],
+        "total_analisados": total_analisados,
         "total_automacao": 0,
         "total_massa_dados": 0,
         "total_ambiente": 0,

@@ -59,6 +59,7 @@ def build_shadow_payload(
     run: RunContext,
     failures: list[FailureAnalysis],
     mds_hierarchy_rows: list[dict[str, object]] | None = None,
+    total_executed: int | None = None,
 ) -> dict[str, object]:
     module = module_from_failures(failures)
     testcase_hierarchy_rows = hierarchy_rows_for_module(
@@ -259,6 +260,8 @@ def build_shadow_payload(
             "data_inicio": run.data_inicio,
             "caminho_logs": str(run.run_folder),
             "total_falhas": len(failures),
+            "total_executed": total_executed,
+            "total_analisados": total_executed if total_executed is not None else len(failures),
             "total_clusters": len(clusters),
             "created_at": now_iso(),
             "fk_modulo": module["id"],

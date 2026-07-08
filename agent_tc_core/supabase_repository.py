@@ -149,6 +149,7 @@ class SupabaseRepository:
                     "status": "analyzed",
                     "total_archives": len(payload.get("falhas") or []),
                     "total_occurrences": len(payload.get("falhas") or []),
+                    "total_executed": run.get("total_executed") if run.get("total_executed") is not None else run.get("total_analisados"),
                     "total_ai_groups": len(payload.get("agrupamentos_shadow") or payload.get("agrupamentos") or []),
                     "created_at": run.get("created_at") or now,
                     "updated_at": now,

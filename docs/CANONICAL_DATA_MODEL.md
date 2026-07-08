@@ -51,6 +51,7 @@ Campos:
 - `status`: texto.
 - `total_archives`: inteiro.
 - `total_occurrences`: inteiro.
+- `total_executed`: inteiro nullable. Total real executado vindo de `wpSomaCasosExecutados` no `Unico.mds`.
 - `total_ai_groups`: inteiro.
 - `created_at`: timestamp.
 - `updated_at`: timestamp.
