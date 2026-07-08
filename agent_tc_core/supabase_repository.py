@@ -473,6 +473,7 @@ class SupabaseRepository:
                 "module_id": module_id,
                 "testcase_node_id": case_id,
                 "testcase_name": source.get("nome_mds") or "",
+                "testcase_description": source.get("descricao") or "",
                 "group_node_id": parent_id,
                 "group_name": source.get("grupo") or "",
                 "source_archive_name": source.get("arquivo_origem") or "",

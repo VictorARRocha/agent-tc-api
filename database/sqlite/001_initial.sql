@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS occurrences (
   module_id TEXT NOT NULL REFERENCES modules(id),
   testcase_node_id TEXT NOT NULL,
   testcase_name TEXT NOT NULL,
+  testcase_description TEXT,
   group_node_id TEXT,
   group_name TEXT,
   source_archive_name TEXT,
