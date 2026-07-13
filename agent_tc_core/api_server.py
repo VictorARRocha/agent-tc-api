@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from .ai_grouping import (
     AiGroupingError,
+    AiGroupingInvalidJsonError,
     AiGroupingValidationError,
     ai_client_from_env,
     build_ai_grouping_input,
@@ -103,6 +104,7 @@ class AgentTcApi:
                 "GET /runs/{id}/performance",
                 "GET /runs/{id}/reexecutable-cases",
                 "GET /runs/{id}/ai-group-status",
+                "GET /runs/{id}/ai-group-debug",
                 "GET /failures/{id}/evidences",
                 "GET /testcase-hierarchy?module=contabil",
                 "GET /rerun-requests",
@@ -139,6 +141,10 @@ class AgentTcApi:
             if hasattr(self.repository, "ai_grouping_status"):
                 return HTTPStatus.OK, self.repository.ai_grouping_status(run_id)
             return HTTPStatus.OK, {"run_id": run_id, "status": "not_supported", "grouped": False}
+        if child == "ai-group-debug":
+            if hasattr(self.repository, "ai_grouping_debug"):
+                return HTTPStatus.OK, self.repository.ai_grouping_debug(run_id)
+            return HTTPStatus.OK, {"run_id": run_id, "status": "not_supported"}
         return HTTPStatus.NOT_FOUND, {"error": "not_found", "child": child}
 
     def _analyze(self, body: dict[str, Any]) -> tuple[int, Any]:
@@ -260,7 +266,18 @@ class AgentTcApi:
             )
             self.repository.save_ai_job(job)
         except AiGroupingValidationError as exc:
-            job.update({"status": "invalid_response", "error_message": str(exc), "completed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+            response_json = {"error": str(exc)}
+            if isinstance(exc, AiGroupingInvalidJsonError):
+                response_json["raw_text_preview"] = exc.raw_text[:4000]
+                response_json["raw_text_length"] = len(exc.raw_text)
+            job.update(
+                {
+                    "status": "invalid_response",
+                    "response_json": response_json,
+                    "error_message": str(exc),
+                    "completed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                }
+            )
             self.repository.save_ai_job(job)
             return HTTPStatus.UNPROCESSABLE_ENTITY, {"ok": False, "error": "invalid_ai_response", "message": str(exc), "job_id": job_id}
         except Exception as exc:

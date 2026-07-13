@@ -308,6 +308,31 @@ class SQLiteRepository:
             "grouped": bool(groups_count) and bool(latest and latest["status"] == "completed"),
         }
 
+    def ai_grouping_debug(self, run_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            latest = conn.execute(
+                "SELECT * FROM ai_analysis_jobs WHERE run_id = ? ORDER BY created_at DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+        if not latest:
+            return {"run_id": run_id, "job": None}
+        request = json_value(latest["request_json"], {})
+        response = json_value(latest["response_json"], {})
+        return {
+            "run_id": run_id,
+            "job": {
+                "id": latest["id"],
+                "provider": latest["provider"],
+                "model": latest["model"],
+                "status": latest["status"],
+                "error_message": latest["error_message"],
+                "created_at": latest["created_at"],
+                "completed_at": latest["completed_at"],
+            },
+            "request_summary": _ai_request_summary(request),
+            "response_debug": _ai_response_debug(response),
+        }
+
     def save_ai_job(self, row: dict[str, Any]) -> None:
         stored = dict(row)
         stored["request_json"] = json.dumps(stored.get("request_json") or {}, ensure_ascii=False)
@@ -932,6 +957,33 @@ def import_summary(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _unique_count(rows: list[dict[str, Any]], key: str) -> int:
     return len({str(row.get(key)) for row in rows if row.get(key) is not None})
+
+
+def _ai_request_summary(request: Any) -> dict[str, Any]:
+    if not isinstance(request, dict):
+        return {}
+    return {
+        "contract_version": request.get("contract_version"),
+        "failures_count": len(request.get("falhas") or []),
+        "metadata": request.get("metadata") if isinstance(request.get("metadata"), dict) else {},
+    }
+
+
+def _ai_response_debug(response: Any) -> dict[str, Any]:
+    if not isinstance(response, dict):
+        return {"type": type(response).__name__}
+    out = {
+        "keys": sorted(str(key) for key in response.keys()),
+        "error": response.get("error"),
+        "raw_text_length": response.get("raw_text_length"),
+    }
+    preview = response.get("raw_text_preview")
+    if isinstance(preview, str):
+        out["raw_text_preview"] = preview[:4000]
+    validated = response.get("validated")
+    if isinstance(validated, dict):
+        out["validated_clusters"] = len(validated.get("clusters") or [])
+    return out
 
 
 def occurrence_type(status: object) -> str:

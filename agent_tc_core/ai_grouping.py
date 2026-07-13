@@ -29,6 +29,12 @@ class AiGroupingValidationError(AiGroupingError):
     pass
 
 
+class AiGroupingInvalidJsonError(AiGroupingValidationError):
+    def __init__(self, message: str, raw_text: str):
+        self.raw_text = raw_text
+        super().__init__(message)
+
+
 class OpenAIResponsesClient:
     provider = "openai"
 
@@ -108,7 +114,7 @@ class OpenAIResponsesClient:
         try:
             parsed = json.loads(output_text)
         except json.JSONDecodeError as exc:
-            raise AiGroupingValidationError("A OpenAI nao retornou JSON valido") from exc
+            raise AiGroupingInvalidJsonError("A OpenAI nao retornou JSON valido", output_text) from exc
         return parsed, raw_response
 
 
@@ -184,7 +190,7 @@ class GeminiChatCompletionsClient:
         try:
             parsed = json.loads(_strip_json_fence(output_text))
         except json.JSONDecodeError as exc:
-            raise AiGroupingValidationError("O Gemini nao retornou JSON valido") from exc
+            raise AiGroupingInvalidJsonError("O Gemini nao retornou JSON valido", output_text) from exc
         return parsed, raw_response
 
     def _group_failures_without_schema(self, ai_input: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -218,7 +224,7 @@ class GeminiChatCompletionsClient:
         try:
             parsed = json.loads(_strip_json_fence(output_text))
         except json.JSONDecodeError as exc:
-            raise AiGroupingValidationError("O Gemini nao retornou JSON valido") from exc
+            raise AiGroupingInvalidJsonError("O Gemini nao retornou JSON valido", output_text) from exc
         return parsed, raw_response
 
 
