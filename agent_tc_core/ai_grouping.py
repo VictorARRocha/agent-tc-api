@@ -14,7 +14,9 @@ from urllib.request import Request, urlopen
 
 MAX_TEXT_LENGTH = 1600
 DEFAULT_OPENAI_MODEL = "gpt-5.4-mini"
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+GEMINI_OPENAI_CHAT_COMPLETIONS_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 CONTRACT_VERSION = "agent-tc-ai-grouping-v1"
 SIGNATURE_RE = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
 
@@ -28,6 +30,8 @@ class AiGroupingValidationError(AiGroupingError):
 
 
 class OpenAIResponsesClient:
+    provider = "openai"
+
     def __init__(
         self,
         *,
@@ -106,6 +110,126 @@ class OpenAIResponsesClient:
         except json.JSONDecodeError as exc:
             raise AiGroupingValidationError("A OpenAI nao retornou JSON valido") from exc
         return parsed, raw_response
+
+
+class GeminiChatCompletionsClient:
+    provider = "gemini"
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str = DEFAULT_GEMINI_MODEL,
+        timeout: int = 120,
+        max_output_tokens: int = 6000,
+    ):
+        if not api_key:
+            raise AiGroupingError("GEMINI_API_KEY nao configurada")
+        self.api_key = api_key
+        self.model = model
+        self.timeout = timeout
+        self.max_output_tokens = max_output_tokens
+
+    @classmethod
+    def from_env(cls, env_path: str | Path | None = None) -> "GeminiChatCompletionsClient":
+        env = _read_env(env_path)
+        return cls(
+            api_key=env.get("GEMINI_API_KEY", ""),
+            model=env.get("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL,
+            timeout=_positive_int(env.get("GEMINI_TIMEOUT_SECONDS") or env.get("AI_TIMEOUT_SECONDS"), 120),
+            max_output_tokens=_positive_int(
+                env.get("GEMINI_MAX_OUTPUT_TOKENS") or env.get("AI_MAX_OUTPUT_TOKENS"),
+                6000,
+            ),
+        )
+
+    def group_failures(self, ai_input: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        body = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": _system_prompt() + "\n" + _json_only_prompt()},
+                {"role": "user", "content": json.dumps(ai_input, ensure_ascii=False, separators=(",", ":"))},
+            ],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "agent_tc_ai_grouping",
+                    "strict": True,
+                    "schema": response_json_schema(),
+                },
+            },
+            "max_tokens": self.max_output_tokens,
+        }
+        request = Request(
+            GEMINI_OPENAI_CHAT_COMPLETIONS_URL,
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Authorization": "Bearer " + self.api_key,
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                raw_response = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            if exc.code == 400 and "response_format" in detail:
+                return self._group_failures_without_schema(ai_input)
+            raise AiGroupingError(f"Gemini HTTP {exc.code}: {detail[:500]}") from exc
+        except URLError as exc:
+            raise AiGroupingError("Falha de conexao com o Gemini: " + str(exc)) from exc
+
+        output_text = _extract_chat_completion_text(raw_response, provider="Gemini")
+        try:
+            parsed = json.loads(_strip_json_fence(output_text))
+        except json.JSONDecodeError as exc:
+            raise AiGroupingValidationError("O Gemini nao retornou JSON valido") from exc
+        return parsed, raw_response
+
+    def _group_failures_without_schema(self, ai_input: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        body = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": _system_prompt() + "\n" + _json_only_prompt()},
+                {"role": "user", "content": json.dumps(ai_input, ensure_ascii=False, separators=(",", ":"))},
+            ],
+            "max_tokens": self.max_output_tokens,
+        }
+        request = Request(
+            GEMINI_OPENAI_CHAT_COMPLETIONS_URL,
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Authorization": "Bearer " + self.api_key,
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                raw_response = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise AiGroupingError(f"Gemini HTTP {exc.code}: {detail[:500]}") from exc
+        except URLError as exc:
+            raise AiGroupingError("Falha de conexao com o Gemini: " + str(exc)) from exc
+
+        output_text = _extract_chat_completion_text(raw_response, provider="Gemini")
+        try:
+            parsed = json.loads(_strip_json_fence(output_text))
+        except json.JSONDecodeError as exc:
+            raise AiGroupingValidationError("O Gemini nao retornou JSON valido") from exc
+        return parsed, raw_response
+
+
+def ai_client_from_env(env_path: str | Path | None = None) -> Any:
+    env = _read_env(env_path)
+    provider = (env.get("AI_PROVIDER") or "openai").strip().lower()
+    if provider == "openai":
+        return OpenAIResponsesClient.from_env(env_path)
+    if provider == "gemini":
+        return GeminiChatCompletionsClient.from_env(env_path)
+    raise AiGroupingError("AI_PROVIDER invalido. Use openai ou gemini")
 
 
 def build_ai_grouping_input(repository: Any, run_id: str) -> dict[str, Any]:
@@ -383,12 +507,40 @@ def _extract_output_text(response: dict[str, Any]) -> str:
     raise AiGroupingError("Resposta da OpenAI sem output_text")
 
 
+def _extract_chat_completion_text(response: dict[str, Any], *, provider: str) -> str:
+    choices = response.get("choices") or []
+    if not choices:
+        raise AiGroupingError(f"Resposta do {provider} sem choices")
+    message = choices[0].get("message") or {}
+    content = message.get("content")
+    if isinstance(content, str) and content.strip():
+        return content
+    raise AiGroupingError(f"Resposta do {provider} sem conteudo textual")
+
+
+def _strip_json_fence(value: str) -> str:
+    value = value.strip()
+    if value.startswith("```"):
+        value = re.sub(r"^```(?:json)?\s*", "", value, flags=re.IGNORECASE)
+        value = re.sub(r"\s*```$", "", value)
+    return value.strip()
+
+
 def _system_prompt() -> str:
     return (
         "Voce e o classificador de falhas do Agent TC. Sua unica tarefa e agrupar as falhas "
         "recebidas por causa semelhante. Nao possui ferramentas, banco de dados ou acesso a arquivos. "
         "Nao invente informacoes. Toda falha deve aparecer exatamente uma vez. Escreva textos em "
         "portugues do Brasil e assinaturas tecnicas curtas em snake_case."
+    )
+
+
+def _json_only_prompt() -> str:
+    return (
+        "Responda somente com JSON valido, sem markdown. O JSON deve ter exatamente o formato: "
+        "{\"clusters\":[{\"titulo_causa\":\"...\",\"assinatura_tecnica\":\"snake_case\","
+        "\"classificacao\":\"...\",\"confianca\":0,\"falhas\":[\"id\"],"
+        "\"justificativa\":\"...\",\"proximos_passos\":[\"...\"]}]}"
     )
 
 
@@ -401,7 +553,19 @@ def _read_env(path: str | Path | None) -> dict[str, str]:
                 continue
             key, value = line.split("=", 1)
             values[key.strip()] = value.strip().strip('"').strip("'")
-    for key in ("OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_TIMEOUT_SECONDS", "OPENAI_MAX_OUTPUT_TOKENS"):
+    for key in (
+        "AI_PROVIDER",
+        "AI_TIMEOUT_SECONDS",
+        "AI_MAX_OUTPUT_TOKENS",
+        "OPENAI_API_KEY",
+        "OPENAI_MODEL",
+        "OPENAI_TIMEOUT_SECONDS",
+        "OPENAI_MAX_OUTPUT_TOKENS",
+        "GEMINI_API_KEY",
+        "GEMINI_MODEL",
+        "GEMINI_TIMEOUT_SECONDS",
+        "GEMINI_MAX_OUTPUT_TOKENS",
+    ):
         if os.getenv(key):
             values[key] = os.environ[key]
     return values

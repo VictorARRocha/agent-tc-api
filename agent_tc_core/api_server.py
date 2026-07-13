@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from .ai_grouping import (
     AiGroupingError,
     AiGroupingValidationError,
-    OpenAIResponsesClient,
+    ai_client_from_env,
     build_ai_grouping_input,
     make_job_id,
     materialize_ai_rows,
@@ -227,16 +227,16 @@ class AgentTcApi:
 
         client = self.openai_client
         try:
-            client = client or OpenAIResponsesClient.from_env(self.env_path)
+            client = client or ai_client_from_env(self.env_path)
         except AiGroupingError as exc:
-            return HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "openai_not_configured", "message": str(exc)}
+            return HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "ai_provider_not_configured", "message": str(exc)}
 
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         job_id = make_job_id(run_id, ai_input)
         job = {
             "id": job_id,
             "run_id": run_id,
-            "provider": "openai",
+            "provider": getattr(client, "provider", client.__class__.__name__),
             "model": client.model,
             "request_json": ai_input,
             "response_json": {},
