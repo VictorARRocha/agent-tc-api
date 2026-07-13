@@ -49,6 +49,8 @@ class FakeOpenAIClient:
     model = "fake-model"
 
     def group_failures(self, ai_input):
+        first_id = ai_input["falhas"][0]["id"]
+        second_id = ai_input["falhas"][1]["id"]
         response = {
             "clusters": [
                 {
@@ -56,7 +58,7 @@ class FakeOpenAIClient:
                     "assinatura_tecnica": "access_violation",
                     "classificacao": "Quebra",
                     "confianca": 95,
-                    "falhas": ["falha-1"],
+                    "falhas": [first_id],
                     "justificativa": "As mensagens indicam falha de acesso.",
                     "proximos_passos": ["Revisar o ponto de acesso."],
                 },
@@ -65,7 +67,7 @@ class FakeOpenAIClient:
                     "assinatura_tecnica": "relatorio_diferente",
                     "classificacao": "Diferenca",
                     "confianca": 90,
-                    "falhas": ["falha-2"],
+                    "falhas": [second_id],
                     "justificativa": "O relatorio atual diverge da base.",
                     "proximos_passos": [],
                 },
@@ -80,9 +82,11 @@ class FakeBatchClient:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.seen_ids = []
 
     def group_failures(self, ai_input):
         self.calls += 1
+        self.seen_ids.extend(item["id"] for item in ai_input["falhas"])
         return {
             "clusters": [
                 {
@@ -131,8 +135,10 @@ class AiGroupingTests(unittest.TestCase):
         client = FakeBatchClient()
         response, raw = group_failures_in_batches(client, ai_input, batch_size=2)
         self.assertEqual(3, client.calls)
+        self.assertEqual(["f001", "f002", "f001", "f002", "f001", "f002"], client.seen_ids)
         self.assertEqual(3, len(response["clusters"]))
-        self.assertEqual(6, sum(len(cluster["falhas"]) for cluster in response["clusters"]))
+        grouped_ids = [failure_id for cluster in response["clusters"] for failure_id in cluster["falhas"]]
+        self.assertEqual([f"f{i}" for i in range(6)], grouped_ids)
         self.assertEqual("batched", raw["mode"])
 
     def test_api_real_flow_and_idempotence(self):

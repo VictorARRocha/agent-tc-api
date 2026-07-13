@@ -369,8 +369,11 @@ def group_failures_in_batches(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     failures = ai_input.get("falhas") or []
     if len(failures) <= batch_size:
-        candidate, raw_response = client.group_failures(ai_input)
-        return validate_ai_grouping_response(candidate, ai_input), {"mode": "single", "responses": [raw_response]}
+        compact_input, alias_map = _compact_failure_ids(ai_input)
+        candidate, raw_response = client.group_failures(compact_input)
+        validated = validate_ai_grouping_response(candidate, compact_input)
+        restored = _restore_failure_ids(validated, alias_map)
+        return validate_ai_grouping_response(restored, ai_input), {"mode": "single", "responses": [raw_response]}
 
     clusters = []
     responses = []
@@ -384,13 +387,43 @@ def group_failures_in_batches(
             "batch_total": (len(failures) + batch_size - 1) // batch_size,
             "batch_failures_count": len(batch_failures),
         }
-        candidate, raw_response = client.group_failures(batch_input)
-        validated = validate_ai_grouping_response(candidate, batch_input)
+        compact_input, alias_map = _compact_failure_ids(batch_input)
+        candidate, raw_response = client.group_failures(compact_input)
+        validated = validate_ai_grouping_response(candidate, compact_input)
+        restored = _restore_failure_ids(validated, alias_map)
         responses.append({"batch": index, "response": raw_response})
-        clusters.extend(_prefix_batch_signatures(validated["clusters"], index))
+        clusters.extend(_prefix_batch_signatures(restored["clusters"], index))
 
     merged = {"clusters": clusters}
     return validate_ai_grouping_response(merged, ai_input), {"mode": "batched", "batch_size": batch_size, "responses": responses}
+
+
+def _compact_failure_ids(ai_input: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+    compact = dict(ai_input)
+    alias_map: dict[str, str] = {}
+    compact_failures = []
+    for index, failure in enumerate(ai_input.get("falhas") or [], start=1):
+        alias = f"f{index:03d}"
+        original_id = str(failure.get("id") or "")
+        alias_map[alias] = original_id
+        compact_failure = dict(failure)
+        compact_failure["id"] = alias
+        compact_failures.append(compact_failure)
+    compact["falhas"] = compact_failures
+    compact["rules"] = list(compact.get("rules") or []) + [
+        "Use o campo id curto das falhas exatamente como recebido, por exemplo f001, f002.",
+        "Nao use id_caso_teste nem nomes de arquivo no campo falhas; use somente os ids curtos.",
+    ]
+    return compact, alias_map
+
+
+def _restore_failure_ids(response: dict[str, Any], alias_map: dict[str, str]) -> dict[str, Any]:
+    clusters = []
+    for cluster in response.get("clusters") or []:
+        restored = dict(cluster)
+        restored["falhas"] = [alias_map.get(str(failure_id), str(failure_id)) for failure_id in cluster.get("falhas") or []]
+        clusters.append(restored)
+    return {"clusters": clusters}
 
 
 def _prefix_batch_signatures(clusters: list[dict[str, Any]], batch_index: int) -> list[dict[str, Any]]:
