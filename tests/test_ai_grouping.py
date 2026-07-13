@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tc_core.ai_grouping import AiGroupingValidationError, validate_ai_grouping_response
+from agent_tc_core.ai_grouping import AiGroupingValidationError, _strip_json_fence, validate_ai_grouping_response
 from agent_tc_core.api_server import AgentTcApi
 
 
@@ -92,6 +92,10 @@ class AiGroupingTests(unittest.TestCase):
         }
         with self.assertRaises(AiGroupingValidationError):
             validate_ai_grouping_response(response, self.ai_input)
+
+    def test_extracts_json_from_model_text(self):
+        text = 'Claro, segue o JSON:\n{"clusters":[{"falhas":["a"]}]}\nFim.'
+        self.assertEqual('{"clusters":[{"falhas":["a"]}]}', _strip_json_fence(text))
 
     def test_api_real_flow_and_idempotence(self):
         repository = FakeRepository()

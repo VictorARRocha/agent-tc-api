@@ -523,7 +523,39 @@ def _strip_json_fence(value: str) -> str:
     if value.startswith("```"):
         value = re.sub(r"^```(?:json)?\s*", "", value, flags=re.IGNORECASE)
         value = re.sub(r"\s*```$", "", value)
-    return value.strip()
+    value = value.strip()
+    if value.startswith("{") and value.endswith("}"):
+        return value
+    extracted = _extract_json_object(value)
+    return extracted or value
+
+
+def _extract_json_object(value: str) -> str | None:
+    start = value.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start, len(value)):
+        char = value[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return value[start : index + 1]
+    return None
 
 
 def _system_prompt() -> str:
