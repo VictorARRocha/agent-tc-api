@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 MAX_TEXT_LENGTH = 1600
 DEFAULT_OPENAI_MODEL = "gpt-5.4-mini"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
+DEFAULT_GEMINI_MAX_OUTPUT_TOKENS = 12000
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 GEMINI_OPENAI_CHAT_COMPLETIONS_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 CONTRACT_VERSION = "agent-tc-ai-grouping-v1"
@@ -145,7 +146,7 @@ class GeminiChatCompletionsClient:
             timeout=_positive_int(env.get("GEMINI_TIMEOUT_SECONDS") or env.get("AI_TIMEOUT_SECONDS"), 120),
             max_output_tokens=_positive_int(
                 env.get("GEMINI_MAX_OUTPUT_TOKENS") or env.get("AI_MAX_OUTPUT_TOKENS"),
-                6000,
+                DEFAULT_GEMINI_MAX_OUTPUT_TOKENS,
             ),
         )
 
@@ -165,6 +166,7 @@ class GeminiChatCompletionsClient:
                 },
             },
             "max_tokens": self.max_output_tokens,
+            "max_completion_tokens": self.max_output_tokens,
         }
         request = Request(
             GEMINI_OPENAI_CHAT_COMPLETIONS_URL,
@@ -201,6 +203,7 @@ class GeminiChatCompletionsClient:
                 {"role": "user", "content": json.dumps(ai_input, ensure_ascii=False, separators=(",", ":"))},
             ],
             "max_tokens": self.max_output_tokens,
+            "max_completion_tokens": self.max_output_tokens,
         }
         request = Request(
             GEMINI_OPENAI_CHAT_COMPLETIONS_URL,

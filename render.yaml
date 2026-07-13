@@ -39,4 +39,4 @@ services:
       - key: GEMINI_TIMEOUT_SECONDS
         value: "120"
       - key: GEMINI_MAX_OUTPUT_TOKENS
-        value: "6000"
+        value: "12000"
