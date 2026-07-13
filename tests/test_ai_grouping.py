@@ -4,7 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tc_core.ai_grouping import AiGroupingValidationError, _strip_json_fence, validate_ai_grouping_response
+from agent_tc_core.ai_grouping import (
+    AiGroupingValidationError,
+    _strip_json_fence,
+    group_failures_in_batches,
+    validate_ai_grouping_response,
+)
 from agent_tc_core.api_server import AgentTcApi
 
 
@@ -69,6 +74,30 @@ class FakeOpenAIClient:
         return response, {"id": "resp_fake", "output_text": "{}"}
 
 
+class FakeBatchClient:
+    model = "fake-batch-model"
+    provider = "fake"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def group_failures(self, ai_input):
+        self.calls += 1
+        return {
+            "clusters": [
+                {
+                    "titulo_causa": "Lote",
+                    "assinatura_tecnica": "causa_lote",
+                    "classificacao": "Quebra",
+                    "confianca": 90,
+                    "falhas": [item["id"] for item in ai_input["falhas"]],
+                    "justificativa": "Agrupamento do lote.",
+                    "proximos_passos": [],
+                }
+            ]
+        }, {"batch": self.calls}
+
+
 class AiGroupingTests(unittest.TestCase):
     def setUp(self):
         self.ai_input = {"falhas": [{"id": "a"}, {"id": "b"}]}
@@ -96,6 +125,15 @@ class AiGroupingTests(unittest.TestCase):
     def test_extracts_json_from_model_text(self):
         text = 'Claro, segue o JSON:\n{"clusters":[{"falhas":["a"]}]}\nFim.'
         self.assertEqual('{"clusters":[{"falhas":["a"]}]}', _strip_json_fence(text))
+
+    def test_groups_in_batches_cover_all_failures(self):
+        ai_input = {"falhas": [{"id": f"f{i}"} for i in range(6)]}
+        client = FakeBatchClient()
+        response, raw = group_failures_in_batches(client, ai_input, batch_size=2)
+        self.assertEqual(3, client.calls)
+        self.assertEqual(3, len(response["clusters"]))
+        self.assertEqual(6, sum(len(cluster["falhas"]) for cluster in response["clusters"]))
+        self.assertEqual("batched", raw["mode"])
 
     def test_api_real_flow_and_idempotence(self):
         repository = FakeRepository()

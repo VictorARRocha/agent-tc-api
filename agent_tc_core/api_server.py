@@ -14,9 +14,9 @@ from .ai_grouping import (
     AiGroupingValidationError,
     ai_client_from_env,
     build_ai_grouping_input,
+    group_failures_in_batches,
     make_job_id,
     materialize_ai_rows,
-    validate_ai_grouping_response,
     write_ai_dry_run,
 )
 from .api_repository import LocalPayloadRepository
@@ -253,8 +253,7 @@ class AgentTcApi:
         }
         self.repository.save_ai_job(job)
         try:
-            candidate, raw_response = client.group_failures(ai_input)
-            validated = validate_ai_grouping_response(candidate, ai_input)
+            validated, raw_response = group_failures_in_batches(client, ai_input)
             rows = materialize_ai_rows(self.repository.run(run_id), job_id, validated)
             self.repository.persist_ai_grouping(run_id, job_id, rows)
             job.update(

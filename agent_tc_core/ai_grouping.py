@@ -20,6 +20,7 @@ OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 GEMINI_OPENAI_CHAT_COMPLETIONS_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 CONTRACT_VERSION = "agent-tc-ai-grouping-v1"
 SIGNATURE_RE = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
+DEFAULT_BATCH_SIZE = 25
 
 
 class AiGroupingError(RuntimeError):
@@ -358,6 +359,47 @@ def validate_ai_grouping_response(response: Any, ai_input: dict[str, Any]) -> di
     if missing:
         raise AiGroupingValidationError("Falhas nao agrupadas: " + ", ".join(sorted(missing)))
     return {"clusters": normalized_clusters}
+
+
+def group_failures_in_batches(
+    client: Any,
+    ai_input: dict[str, Any],
+    *,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    failures = ai_input.get("falhas") or []
+    if len(failures) <= batch_size:
+        candidate, raw_response = client.group_failures(ai_input)
+        return validate_ai_grouping_response(candidate, ai_input), {"mode": "single", "responses": [raw_response]}
+
+    clusters = []
+    responses = []
+    for index, start in enumerate(range(0, len(failures), batch_size), start=1):
+        batch_input = dict(ai_input)
+        batch_failures = failures[start : start + batch_size]
+        batch_input["falhas"] = batch_failures
+        batch_input["metadata"] = {
+            **(ai_input.get("metadata") if isinstance(ai_input.get("metadata"), dict) else {}),
+            "batch_index": index,
+            "batch_total": (len(failures) + batch_size - 1) // batch_size,
+            "batch_failures_count": len(batch_failures),
+        }
+        candidate, raw_response = client.group_failures(batch_input)
+        validated = validate_ai_grouping_response(candidate, batch_input)
+        responses.append({"batch": index, "response": raw_response})
+        clusters.extend(_prefix_batch_signatures(validated["clusters"], index))
+
+    merged = {"clusters": clusters}
+    return validate_ai_grouping_response(merged, ai_input), {"mode": "batched", "batch_size": batch_size, "responses": responses}
+
+
+def _prefix_batch_signatures(clusters: list[dict[str, Any]], batch_index: int) -> list[dict[str, Any]]:
+    out = []
+    for cluster in clusters:
+        item = dict(cluster)
+        item["assinatura_tecnica"] = f"lote_{batch_index}_{item['assinatura_tecnica']}"
+        out.append(item)
+    return out
 
 
 def response_json_schema() -> dict[str, Any]:
