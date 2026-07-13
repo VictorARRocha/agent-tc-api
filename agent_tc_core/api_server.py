@@ -86,7 +86,7 @@ class AgentTcApi:
     def index(self) -> dict[str, Any]:
         return {
             "service": "Agent TC API",
-            "mode": "local-json",
+            "mode": _repository_mode(self.repository),
             "logs_root": str(self.logs_root),
             "endpoints": [
                 "GET /health",
@@ -363,6 +363,15 @@ def make_server(
 
 def _path_parts(path: str) -> list[str]:
     return [unquote(part) for part in path.strip("/").split("/") if part]
+
+
+def _repository_mode(repository: Any) -> str:
+    name = repository.__class__.__name__
+    if name == "SupabaseRepository":
+        return "supabase"
+    if name == "SQLiteRepository":
+        return "sqlite"
+    return "local-json"
 
 
 def _first(query: dict[str, list[str]], key: str) -> str | None:
