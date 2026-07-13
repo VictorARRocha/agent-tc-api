@@ -868,8 +868,14 @@ def evidence_api_row(row: sqlite3.Row) -> dict[str, Any]:
 def group_api_row(row: sqlite3.Row) -> dict[str, Any]:
     data = dict(row)
     module_slug = SLUG_BY_MODULE_ID.get(data["module_id"]) or ""
+    is_shadow_group = data.get("ai_analysis_job_id") is None
+    grouping_source = "shadow" if is_shadow_group else "ai"
     return {
         **data,
+        "is_shadow_group": is_shadow_group,
+        "grouping_source": grouping_source,
+        "agrupamento_origem": grouping_source,
+        "agrupamento_ia": not is_shadow_group,
         "id_cluster": data["id"],
         "fk_rodagem": data["run_id"],
         "titulo_causa": data["title"],
