@@ -24,6 +24,7 @@ def main() -> int:
         help="Pasta para relatorios/payloads gerados pelo Python.",
     )
     parser.add_argument("--vm", help="Nome da VM. Se omitido, infere pelo caminho da rodagem.")
+    parser.add_argument("--times-folder", help="Pasta opcional com arquivos Tempos *.txt.")
     parser.add_argument("--backend", choices=["supabase", "sqlite"], default="supabase")
     parser.add_argument("--env", default=str(PROJECT_ROOT / ".env"))
     parser.add_argument("--sqlite-db", default=str(PROJECT_ROOT / "data" / "agent_tc.sqlite"))
@@ -35,6 +36,7 @@ def main() -> int:
         mds_path=args.mds,
         output_root=args.output_root,
         vm_name=args.vm,
+        times_folder=args.times_folder,
     )
 
     if args.backend == "sqlite":
@@ -57,6 +59,7 @@ def main() -> int:
                 "evidencias": len(payload.get("evidencias") or []),
                 "diferencas": len(payload.get("diferencas_relatorio") or []),
                 "testcase_hierarchy": len(payload.get("testcase_hierarchy") or []),
+                "atrasos_rodagem": len(payload.get("atrasos_rodagem") or []),
                 "import_result": result,
             },
             ensure_ascii=False,

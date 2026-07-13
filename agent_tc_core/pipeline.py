@@ -7,6 +7,7 @@ from .config import parse_run_context
 from .extractor import ArchiveExtractionError, extract_archive, find_extractor, inventory_archives
 from .mds import MdsIndex
 from .parser import analyze_failure
+from .performance import parse_times_folder
 from .payload import build_shadow_payload
 from .reporter import write_shadow_reports
 
@@ -40,6 +41,7 @@ def run_shadow_pipeline(
     mds_path: str | Path,
     output_root: str | Path,
     vm_name: str | None = None,
+    times_folder: str | Path | None = None,
 ) -> tuple[Path, dict[str, object]]:
     context = parse_run_context(
         run_folder=run_folder,
@@ -116,6 +118,7 @@ def run_shadow_pipeline(
     total_executed = read_total_tests_from_run_folder(context.run_folder)
     if total_executed is None:
         total_executed = mds.project_variable_int("wpSomaCasosExecutados")
+    delay_rows = parse_times_folder(times_folder)
     payload = build_shadow_payload(
         context,
         failures,
@@ -123,6 +126,7 @@ def run_shadow_pipeline(
         total_executed=total_executed,
         total_archives=len(archives),
         processing_errors=processing_errors,
+        delay_rows=delay_rows,
     )
     write_shadow_reports(report_dir, payload)
     return report_dir, payload

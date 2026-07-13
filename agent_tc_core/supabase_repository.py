@@ -176,6 +176,7 @@ class SupabaseRepository:
                 occurrence_by_case,
                 evidence_by_occurrence_name,
             )
+            self._import_run_delays(payload)
             expected = {
                 "occurrences": _unique_count(payload.get("falhas") or [], "id_falha"),
                 "evidence_files": len(payload.get("evidencias") or []) - self.plan["skipped_evidence"],
@@ -229,6 +230,7 @@ class SupabaseRepository:
             "occurrences": len(payload.get("falhas") or []),
             "evidence_files": len(payload.get("evidencias") or []) - self.plan["skipped_evidence"],
             "report_differences": len(payload.get("diferencas_relatorio") or []),
+            "run_delays": len(payload.get("atrasos_rodagem") or []),
             "ai_groups": len(payload.get("agrupamentos_shadow") or payload.get("agrupamentos") or []),
             "plan": self.plan,
             "verification": verification,
@@ -760,6 +762,29 @@ class SupabaseRepository:
             )
         self._upsert("report_differences", rows)
         return len(rows)
+
+    def _import_run_delays(self, payload: dict[str, Any]) -> set[str]:
+        run_id = payload["rodagem"]["id_rodagem"]
+        module_id = payload["modulo"]["id_modulo"]
+        rows = []
+        ids = set()
+        for source in payload.get("atrasos_rodagem") or []:
+            row = {
+                "id": source["id_atraso"],
+                "run_id": run_id,
+                "module_id": module_id,
+                "testcase_node_id": source.get("codigo_teste") or "",
+                "testcase_name": source.get("nome_teste") or "",
+                "expected_seconds": source.get("tempo_padrao_segundos") or 0,
+                "actual_seconds": source.get("tempo_atual_segundos") or 0,
+                "delay_seconds": source.get("delay_segundos") or 0,
+                "status": source.get("status") or "mais_lento",
+                "created_at": source.get("created_at") or now_iso(),
+            }
+            rows.append(row)
+            ids.add(row["id"])
+        self._upsert("run_delays", rows)
+        return ids
 
     def _module_by_slug(self, slug: str) -> dict[str, Any] | None:
         rows = self._select("modules", {"slug": "eq." + slug, "limit": "1"})

@@ -136,6 +136,7 @@ class SQLiteRepository:
                 occurrence_by_case,
                 evidence_by_occurrence_name,
             )
+            self._import_run_delays(conn, payload)
             expected = {
                 "occurrences": _unique_count(payload.get("falhas") or [], "id_falha"),
                 "evidence_files": _unique_count(payload.get("evidencias") or [], "id_evidencia"),
@@ -704,6 +705,24 @@ class SQLiteRepository:
             written += 1
         return written
 
+    def _import_run_delays(self, conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
+        run_id = payload["rodagem"]["id_rodagem"]
+        module_id = payload["modulo"]["id_modulo"]
+        for source in payload.get("atrasos_rodagem") or []:
+            row = {
+                "id": source["id_atraso"],
+                "run_id": run_id,
+                "module_id": module_id,
+                "testcase_node_id": source.get("codigo_teste") or "",
+                "testcase_name": source.get("nome_teste") or "",
+                "expected_seconds": source.get("tempo_padrao_segundos") or 0,
+                "actual_seconds": source.get("tempo_atual_segundos") or 0,
+                "delay_seconds": source.get("delay_segundos") or 0,
+                "status": source.get("status") or "mais_lento",
+                "created_at": source.get("created_at") or now_iso(),
+            }
+            upsert(conn, "run_delays", row, "id")
+
 
 def upsert(conn: sqlite3.Connection, table: str, row: dict[str, Any], pk: str) -> None:
     columns = list(row)
@@ -950,6 +969,7 @@ def import_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "falhas": len(payload.get("falhas") or []),
         "evidencias": len(payload.get("evidencias") or []),
         "diferencas": len(payload.get("diferencas_relatorio") or []),
+        "atrasos_rodagem": len(payload.get("atrasos_rodagem") or []),
         "testcase_hierarchy": len(payload.get("testcase_hierarchy") or []),
         "erros_processamento": len(payload.get("erros_processamento") or []),
     }

@@ -7,6 +7,7 @@ from pathlib import Path
 from .config import RunContext
 from .constants import MODULE_BY_PREFIX, MODULE_CODES_BY_ID
 from .parser import FailureAnalysis, mime_for
+from .performance import DelayRow, build_delay_payload_rows
 from .utils import ascii_lower, safe_token
 
 
@@ -63,11 +64,25 @@ def build_shadow_payload(
     total_executed: int | None = None,
     total_archives: int | None = None,
     processing_errors: list[dict[str, object]] | None = None,
+    delay_rows: list[DelayRow] | None = None,
 ) -> dict[str, object]:
     module = module_from_failures(failures)
     testcase_hierarchy_rows = hierarchy_rows_for_module(
         mds_hierarchy_rows or [],
         module,
+    )
+    hierarchy_by_node = {
+        str(row.get("node_id")): row
+        for row in testcase_hierarchy_rows
+        if row.get("node_id")
+    }
+    atrasos_rows = build_delay_payload_rows(
+        run=run,
+        module_id=module["id"],
+        delay_rows=delay_rows or [],
+        hierarchy_by_node=hierarchy_by_node,
+        module_codes=set(MODULE_CODES_BY_ID.get(module["id"], ())),
+        created_at=now_iso(),
     )
     failure_ids = {
         id(failure): failure_id(
@@ -282,6 +297,7 @@ def build_shadow_payload(
         "falhas": falhas_rows,
         "evidencias": evidencias_rows,
         "diferencas_relatorio": diferencas_rows,
+        "atrasos_rodagem": atrasos_rows,
         "testcase_hierarchy": testcase_hierarchy_rows,
         "erros_processamento": processing_errors or [],
         "upsert_plan": {
