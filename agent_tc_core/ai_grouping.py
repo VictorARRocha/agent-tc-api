@@ -165,7 +165,6 @@ class GeminiChatCompletionsClient:
                     "schema": response_json_schema(),
                 },
             },
-            "max_tokens": self.max_output_tokens,
             "max_completion_tokens": self.max_output_tokens,
         }
         request = Request(
@@ -202,7 +201,6 @@ class GeminiChatCompletionsClient:
                 {"role": "system", "content": _system_prompt() + "\n" + _json_only_prompt()},
                 {"role": "user", "content": json.dumps(ai_input, ensure_ascii=False, separators=(",", ":"))},
             ],
-            "max_tokens": self.max_output_tokens,
             "max_completion_tokens": self.max_output_tokens,
         }
         request = Request(
