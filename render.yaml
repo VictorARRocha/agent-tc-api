@@ -16,6 +16,8 @@ services:
         value: public
       - key: SUPABASE_TABLE_PREFIX
         value: agent_tc_
+      - key: AGENT_TC_BACKEND
+        value: supabase
       - key: OPENAI_API_KEY
         sync: false
       - key: OPENAI_MODEL

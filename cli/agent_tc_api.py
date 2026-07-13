@@ -14,6 +14,15 @@ from agent_tc_core.sqlite_repository import SQLiteRepository
 from agent_tc_core.supabase_repository import SupabaseRepository
 
 
+def default_backend() -> str:
+    configured = os.getenv("AGENT_TC_BACKEND")
+    if configured:
+        return configured
+    if os.getenv("SUPABASE_URL"):
+        return "supabase"
+    return "local-json"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Agent TC local API")
     parser.add_argument("--host", default=os.getenv("HOST", "127.0.0.1"))
@@ -26,7 +35,7 @@ def main() -> int:
     parser.add_argument(
         "--backend",
         choices=["local-json", "sqlite", "supabase"],
-        default="local-json",
+        default=default_backend(),
         help="Fonte de dados da API.",
     )
     parser.add_argument(
