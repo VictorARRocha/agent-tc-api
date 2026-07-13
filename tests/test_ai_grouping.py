@@ -136,7 +136,7 @@ class AiGroupingTests(unittest.TestCase):
         response, raw = group_failures_in_batches(client, ai_input, batch_size=2)
         self.assertEqual(3, client.calls)
         self.assertEqual(["f001", "f002", "f001", "f002", "f001", "f002"], client.seen_ids)
-        self.assertEqual(3, len(response["clusters"]))
+        self.assertEqual(1, len(response["clusters"]))
         grouped_ids = [failure_id for cluster in response["clusters"] for failure_id in cluster["falhas"]]
         self.assertEqual([f"f{i}" for i in range(6)], grouped_ids)
         self.assertEqual("batched", raw["mode"])

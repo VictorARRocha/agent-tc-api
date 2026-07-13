@@ -392,9 +392,9 @@ def group_failures_in_batches(
         validated = validate_ai_grouping_response(candidate, compact_input)
         restored = _restore_failure_ids(validated, alias_map)
         responses.append({"batch": index, "response": raw_response})
-        clusters.extend(_prefix_batch_signatures(restored["clusters"], index))
+        clusters.extend(restored["clusters"])
 
-    merged = {"clusters": clusters}
+    merged = {"clusters": _merge_similar_clusters(clusters)}
     return validate_ai_grouping_response(merged, ai_input), {"mode": "batched", "batch_size": batch_size, "responses": responses}
 
 
@@ -426,12 +426,79 @@ def _restore_failure_ids(response: dict[str, Any], alias_map: dict[str, str]) ->
     return {"clusters": clusters}
 
 
-def _prefix_batch_signatures(clusters: list[dict[str, Any]], batch_index: int) -> list[dict[str, Any]]:
-    out = []
+def _merge_similar_clusters(clusters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
     for cluster in clusters:
-        item = dict(cluster)
-        item["assinatura_tecnica"] = f"lote_{batch_index}_{item['assinatura_tecnica']}"
-        out.append(item)
+        key = _cluster_merge_key(cluster)
+        if key not in merged:
+            merged[key] = dict(cluster, falhas=list(cluster["falhas"]), proximos_passos=list(cluster.get("proximos_passos") or []))
+            order.append(key)
+            continue
+        target = merged[key]
+        target["falhas"].extend(cluster["falhas"])
+        target["confianca"] = min(int(target["confianca"]), int(cluster["confianca"]))
+        target["justificativa"] = _join_unique_sentences(target["justificativa"], cluster["justificativa"])
+        target["proximos_passos"] = _merge_steps(target.get("proximos_passos") or [], cluster.get("proximos_passos") or [])
+    return [merged[key] for key in order]
+
+
+def _cluster_merge_key(cluster: dict[str, Any]) -> str:
+    signature = str(cluster.get("assinatura_tecnica") or "")
+    text = " ".join(
+        [
+            signature,
+            str(cluster.get("titulo_causa") or ""),
+            str(cluster.get("classificacao") or ""),
+        ]
+    )
+    text = _normalize_merge_text(text)
+    if "janela" in text and "atencao" in text:
+        return "janela_atencao_inesperada"
+    if "comparacao" in text or "diferenca" in text or "relatorio" in text:
+        return signature or text
+    return signature or text
+
+
+def _normalize_merge_text(value: str) -> str:
+    value = value.lower()
+    replacements = {
+        "ç": "c",
+        "ã": "a",
+        "á": "a",
+        "à": "a",
+        "â": "a",
+        "é": "e",
+        "ê": "e",
+        "í": "i",
+        "ó": "o",
+        "ô": "o",
+        "õ": "o",
+        "ú": "u",
+    }
+    for source, target in replacements.items():
+        value = value.replace(source, target)
+    return re.sub(r"[^a-z0-9]+", " ", value).strip()
+
+
+def _join_unique_sentences(first: str, second: str) -> str:
+    if not second or second in first:
+        return first
+    if not first:
+        return second
+    return (first.rstrip(".") + ". " + second).strip()
+
+
+def _merge_steps(first: list[str], second: list[str]) -> list[str]:
+    out = list(first)
+    seen = {_normalize_merge_text(step) for step in out}
+    for step in second:
+        key = _normalize_merge_text(step)
+        if key and key not in seen:
+            out.append(step)
+            seen.add(key)
+        if len(out) >= 10:
+            break
     return out
 
 
