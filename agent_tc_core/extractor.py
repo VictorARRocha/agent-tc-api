@@ -22,6 +22,18 @@ class ArchiveInfo:
     id_valido: bool
 
 
+class ArchiveExtractionError(RuntimeError):
+    def __init__(self, archive: ArchiveInfo, target: Path, returncode: int, output: str):
+        self.archive = archive
+        self.target = target
+        self.returncode = returncode
+        self.output = output
+        super().__init__(
+            f"Falha ao extrair {archive.nome_arquivo}: codigo {returncode}; "
+            + output[-1500:]
+        )
+
+
 def find_extractor() -> Path | None:
     for path in (
         Path(r"C:\Program Files\7-Zip\7z.exe"),
@@ -104,8 +116,10 @@ def extract_archive(archive: ArchiveInfo, analysis_dir: Path, extractor: Path | 
         check=False,
     )
     if result.returncode != 0:
-        raise RuntimeError(
-            f"Falha ao extrair {archive.nome_arquivo}: codigo {result.returncode}; "
-            + result.stdout[-1500:]
+        raise ArchiveExtractionError(
+            archive,
+            target,
+            result.returncode,
+            result.stdout,
         )
     return target

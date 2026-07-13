@@ -24,6 +24,7 @@ def build_summary(payload: dict[str, object]) -> str:
     evidencias = payload["evidencias"]
     diffs = payload["diferencas_relatorio"]
     hierarchy = payload.get("testcase_hierarchy", [])
+    processing_errors = payload.get("erros_processamento", [])
 
     lines = [
         "# Agent TC Shadow Report",
@@ -36,6 +37,7 @@ def build_summary(payload: dict[str, object]) -> str:
         f"- Evidencias preparadas: {len(evidencias)}",
         f"- Diferencas detectadas: {len(diffs)}",
         f"- Hierarquia MDS preparada: {len(hierarchy)}",
+        f"- Erros de processamento: {len(processing_errors)}",
         "",
         "## Falhas",
         "",

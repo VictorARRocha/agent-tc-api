@@ -16,3 +16,11 @@ services:
         value: public
       - key: SUPABASE_TABLE_PREFIX
         value: agent_tc_
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-5.4-mini
+      - key: OPENAI_TIMEOUT_SECONDS
+        value: "120"
+      - key: OPENAI_MAX_OUTPUT_TOKENS
+        value: "6000"

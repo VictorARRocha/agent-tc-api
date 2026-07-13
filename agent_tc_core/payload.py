@@ -46,8 +46,9 @@ def hierarchy_rows_for_module(
     ]
 
 
-def failure_id(run: RunContext, case_id: str, index: int) -> str:
-    suffix = safe_token(case_id) if case_id != "ID invalido" else f"id_invalido_{index:03d}"
+def failure_id(run: RunContext, case_id: str, archive_name: str, index: int) -> str:
+    archive_token = safe_token(Path(archive_name).stem)
+    suffix = archive_token if archive_token != "NA" else f"id_invalido_{index:03d}"
     return f"falha_{run.id_rodagem}_{suffix}"
 
 
@@ -60,6 +61,8 @@ def build_shadow_payload(
     failures: list[FailureAnalysis],
     mds_hierarchy_rows: list[dict[str, object]] | None = None,
     total_executed: int | None = None,
+    total_archives: int | None = None,
+    processing_errors: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     module = module_from_failures(failures)
     testcase_hierarchy_rows = hierarchy_rows_for_module(
@@ -67,7 +70,12 @@ def build_shadow_payload(
         module,
     )
     failure_ids = {
-        id(failure): failure_id(run, failure.archive.id_caso_teste, index)
+        id(failure): failure_id(
+            run,
+            failure.archive.id_caso_teste,
+            failure.archive.nome_arquivo,
+            index,
+        )
         for index, failure in enumerate(failures, 1)
     }
     cluster_by_status: dict[str, str] = {}
@@ -230,6 +238,7 @@ def build_shadow_payload(
             diferencas_rows.append(
                 {
                     "id_diferenca": f"diff_{run.id_rodagem}_{diff_counter:04d}",
+                    "fk_falha": fid,
                     "fk_rodagem": run.id_rodagem,
                     "fk_modulo": module["id"],
                     "id_caso_teste": failure.archive.id_caso_teste,
@@ -260,6 +269,7 @@ def build_shadow_payload(
             "data_inicio": run.data_inicio,
             "caminho_logs": str(run.run_folder),
             "total_falhas": len(failures),
+            "total_archives": total_archives if total_archives is not None else len(failures),
             "total_executed": total_executed,
             "total_analisados": total_executed if total_executed is not None else len(failures),
             "total_clusters": len(clusters),
@@ -273,6 +283,7 @@ def build_shadow_payload(
         "evidencias": evidencias_rows,
         "diferencas_relatorio": diferencas_rows,
         "testcase_hierarchy": testcase_hierarchy_rows,
+        "erros_processamento": processing_errors or [],
         "upsert_plan": {
             "testcase_hierarchy": {
                 "table": "testcase_hierarchy",

@@ -38,11 +38,6 @@ class SQLiteRepository:
             except sqlite3.OperationalError as exc:
                 if "duplicate column" not in str(exc).lower():
                     raise
-            try:
-                conn.execute("ALTER TABLE occurrences ADD COLUMN testcase_description TEXT")
-            except sqlite3.OperationalError as exc:
-                if "duplicate column" not in str(exc).lower():
-                    raise
             self.seed_modules(conn)
         finally:
             conn.close()
@@ -97,53 +92,103 @@ class SQLiteRepository:
             f"{run_id}|{hashlib.sha256(payload_bytes).hexdigest()}",
         ).hex
 
-        with self.connect() as conn:
+        run_row = {
+            "id": run_id,
+            "system": run.get("sistema") or module_system(module_id),
+            "version": run.get("versao") or "",
+            "vm_name": str(run.get("vm_name") or "").lower(),
+            "module_id": module_id,
+            "started_at": run.get("data_inicio") or now,
+            "finished_at": None,
+            "logs_path": run.get("caminho_logs") or "",
+            "status": "processing",
+            "total_archives": run.get("total_archives") if run.get("total_archives") is not None else len(payload.get("falhas") or []),
+            "total_occurrences": len(payload.get("falhas") or []),
+            "total_executed": run.get("total_executed") if run.get("total_executed") is not None else run.get("total_analisados"),
+            "total_ai_groups": len(payload.get("agrupamentos_shadow") or payload.get("agrupamentos") or []),
+            "created_at": run.get("created_at") or now,
+            "updated_at": now,
+        }
+        batch_row = {
+            "id": batch_id,
+            "run_id": run_id,
+            "source": source,
+            "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+            "status": "processing",
+            "summary_json": json.dumps(import_summary(payload), ensure_ascii=False),
+            "created_at": now,
+            "completed_at": None,
+        }
+        conn = self.connect()
+        try:
             self.seed_modules(conn)
-            upsert(
-                conn,
-                "runs",
-                {
-                    "id": run_id,
-                    "system": run.get("sistema") or module_system(module_id),
-                    "version": run.get("versao") or "",
-                    "vm_name": run.get("vm_name") or "",
-                    "module_id": module_id,
-                    "started_at": run.get("data_inicio") or now,
-                    "finished_at": None,
-                    "logs_path": run.get("caminho_logs") or "",
-                    "status": "analyzed",
-                    "total_archives": len(payload.get("falhas") or []),
-                    "total_occurrences": len(payload.get("falhas") or []),
-                    "total_executed": run.get("total_executed") if run.get("total_executed") is not None else run.get("total_analisados"),
-                    "total_ai_groups": len(payload.get("agrupamentos_shadow") or payload.get("agrupamentos") or []),
-                    "created_at": run.get("created_at") or now,
-                    "updated_at": now,
-                },
-                "id",
-            )
-            upsert(
-                conn,
-                "ingestion_batches",
-                {
-                    "id": batch_id,
-                    "run_id": run_id,
-                    "source": source,
-                    "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
-                    "status": "completed",
-                    "summary_json": json.dumps(import_summary(payload), ensure_ascii=False),
-                    "created_at": now,
-                    "completed_at": now,
-                },
-                "id",
-            )
+            upsert(conn, "runs", run_row, "id")
+            upsert(conn, "ingestion_batches", batch_row, "id")
 
             hierarchy_rows = self._import_hierarchy(conn, payload)
             occurrence_by_case = self._import_occurrences(conn, payload, hierarchy_rows)
             group_ids = self._import_ai_groups(conn, payload)
             self._import_group_links(conn, payload, group_ids)
             evidence_by_occurrence_name = self._import_evidence(conn, payload)
-            self._import_report_differences(conn, payload, occurrence_by_case, evidence_by_occurrence_name)
+            differences_written = self._import_report_differences(
+                conn,
+                payload,
+                occurrence_by_case,
+                evidence_by_occurrence_name,
+            )
+            expected = {
+                "occurrences": _unique_count(payload.get("falhas") or [], "id_falha"),
+                "evidence_files": _unique_count(payload.get("evidencias") or [], "id_evidencia"),
+                "report_differences": differences_written,
+                "ai_groups": len(group_ids),
+            }
+            actual = {
+                "occurrences": conn.execute("SELECT COUNT(*) FROM occurrences WHERE run_id = ?", (run_id,)).fetchone()[0],
+                "evidence_files": conn.execute("SELECT COUNT(*) FROM evidence_files WHERE run_id = ?", (run_id,)).fetchone()[0],
+                "report_differences": conn.execute("SELECT COUNT(*) FROM report_differences WHERE run_id = ?", (run_id,)).fetchone()[0],
+                "ai_groups": conn.execute("SELECT COUNT(*) FROM ai_groups WHERE run_id = ? AND ai_analysis_job_id IS NULL", (run_id,)).fetchone()[0],
+            }
+            mismatches = {key: {"expected": expected[key], "actual": actual[key]} for key in expected if expected[key] != actual[key]}
+            if mismatches:
+                raise RuntimeError("Verificacao pos-importacao falhou: " + json.dumps(mismatches, ensure_ascii=False, sort_keys=True))
+            verification = {"ok": True, "expected": expected, "actual": actual}
+            run_row.update({"status": "analyzed", "updated_at": now_iso()})
+            batch_row.update(
+                {
+                    "status": "completed",
+                    "summary_json": json.dumps(
+                        {
+                            **import_summary(payload),
+                            "erros_processamento": payload.get("erros_processamento") or [],
+                            "verification": verification,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "completed_at": now_iso(),
+                }
+            )
+            upsert(conn, "runs", run_row, "id")
+            upsert(conn, "ingestion_batches", batch_row, "id")
             conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            run_row.update({"status": "import_failed", "updated_at": now_iso()})
+            batch_row.update(
+                {
+                    "status": "failed",
+                    "summary_json": json.dumps(
+                        {**import_summary(payload), "error": str(exc)[:2000]},
+                        ensure_ascii=False,
+                    ),
+                    "completed_at": now_iso(),
+                }
+            )
+            upsert(conn, "runs", run_row, "id")
+            upsert(conn, "ingestion_batches", batch_row, "id")
+            conn.commit()
+            raise
+        finally:
+            conn.close()
 
         return {
             "db_path": str(self.db_path),
@@ -154,6 +199,7 @@ class SQLiteRepository:
             "evidence_files": len(payload.get("evidencias") or []),
             "report_differences": len(payload.get("diferencas_relatorio") or []),
             "ai_groups": len(payload.get("agrupamentos_shadow") or payload.get("agrupamentos") or []),
+            "verification": verification,
         }
 
     def modules(self) -> list[dict[str, Any]]:
@@ -224,6 +270,73 @@ class SQLiteRepository:
                 (failure_id,),
             ).fetchall()
         return [evidence_api_row(row) for row in rows]
+
+    def report_differences(self, run_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM report_differences WHERE run_id = ? ORDER BY testcase_node_id, base_file_name",
+                (run_id,),
+            ).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["summary_json"] = json.loads(item.get("summary_json") or "{}")
+            except json.JSONDecodeError:
+                item["summary_json"] = {}
+            out.append(item)
+        return out
+
+    def ai_grouping_status(self, run_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            latest = conn.execute(
+                "SELECT * FROM ai_analysis_jobs WHERE run_id = ? ORDER BY created_at DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            groups_count = conn.execute(
+                "SELECT COUNT(*) FROM ai_groups WHERE run_id = ? AND ai_analysis_job_id IS NOT NULL",
+                (run_id,),
+            ).fetchone()[0]
+        return {
+            "run_id": run_id,
+            "status": latest["status"] if latest else "not_requested",
+            "job_id": latest["id"] if latest else None,
+            "model": latest["model"] if latest else None,
+            "completed_at": latest["completed_at"] if latest else None,
+            "error_message": latest["error_message"] if latest else None,
+            "groups_count": groups_count,
+            "grouped": bool(groups_count) and bool(latest and latest["status"] == "completed"),
+        }
+
+    def save_ai_job(self, row: dict[str, Any]) -> None:
+        stored = dict(row)
+        stored["request_json"] = json.dumps(stored.get("request_json") or {}, ensure_ascii=False)
+        stored["response_json"] = json.dumps(stored.get("response_json") or {}, ensure_ascii=False)
+        with self.connect() as conn:
+            upsert(conn, "ai_analysis_jobs", stored, "id")
+            conn.commit()
+
+    def persist_ai_grouping(self, run_id: str, job_id: str, rows: dict[str, list[dict[str, Any]]]) -> None:
+        groups = rows.get("groups") or []
+        with self.connect() as conn:
+            for row in groups:
+                upsert(conn, "ai_groups", row, "id")
+            for row in rows.get("links") or []:
+                conn.execute(
+                    "INSERT OR IGNORE INTO ai_group_occurrences(group_id, occurrence_id, created_at) VALUES (?, ?, ?)",
+                    (row["group_id"], row["occurrence_id"], row["created_at"]),
+                )
+            for row in rows.get("actions") or []:
+                upsert(conn, "recommended_actions", row, "id")
+            conn.execute(
+                "DELETE FROM ai_groups WHERE run_id = ? AND ai_analysis_job_id IS NULL",
+                (run_id,),
+            )
+            conn.execute(
+                "UPDATE runs SET total_ai_groups = ?, updated_at = ? WHERE id = ?",
+                (len(groups), now_iso(), run_id),
+            )
+            conn.commit()
 
     def groups(self, run_id: str) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -424,7 +537,6 @@ class SQLiteRepository:
                 "module_id": module_id,
                 "testcase_node_id": case_id,
                 "testcase_name": source.get("nome_mds") or "",
-                "testcase_description": source.get("descricao") or "",
                 "group_node_id": parent_id,
                 "group_name": source.get("grupo") or "",
                 "source_archive_name": source.get("arquivo_origem") or "",
@@ -534,13 +646,14 @@ class SQLiteRepository:
         payload: dict[str, Any],
         occurrence_by_case: dict[str, str],
         evidence_by_occurrence_name: dict[tuple[str, str], str],
-    ) -> None:
+    ) -> int:
         run_id = payload["rodagem"]["id_rodagem"]
         module_id = payload["modulo"]["id_modulo"]
         now = now_iso()
+        written = 0
         for source in payload.get("diferencas_relatorio") or []:
             case_id = str(source.get("id_caso_teste") or "")
-            occurrence_id = occurrence_by_case.get(case_id)
+            occurrence_id = source.get("fk_falha") or occurrence_by_case.get(case_id)
             if not occurrence_id:
                 continue
             summary = source.get("resumo_diferenca") or {}
@@ -563,6 +676,8 @@ class SQLiteRepository:
                 "created_at": source.get("created_at") or now,
             }
             upsert(conn, "report_differences", row, "id")
+            written += 1
+        return written
 
 
 def upsert(conn: sqlite3.Connection, table: str, row: dict[str, Any], pk: str) -> None:
@@ -668,9 +783,7 @@ def run_api_row(row: sqlite3.Row) -> dict[str, Any]:
 def occurrence_api_row(row: sqlite3.Row) -> dict[str, Any]:
     data = dict(row)
     module_slug = SLUG_BY_MODULE_ID.get(data["module_id"]) or ""
-    testcase_description = data.get("testcase_description") or ""
-    error_text = data["error_message"] or data["log_summary"] or ""
-    description = testcase_description or data["testcase_name"]
+    description = data["log_summary"] or data["error_message"] or data["testcase_name"]
     return {
         **data,
         "id_falha": data["id"],
@@ -696,8 +809,8 @@ def occurrence_api_row(row: sqlite3.Row) -> dict[str, Any]:
         "descricao_caso": description,
         "confianca_associacao": None,
         "erro_titulo": data["testcase_name"],
-        "erro_principal": error_text,
-        "mensagem_principal": error_text,
+        "erro_principal": data["error_message"] or description,
+        "mensagem_principal": data["error_message"] or description,
         "trecho_relevante": None,
         "call_stack_resumido": data["error_message"],
         "tipo_tecnico": data["occurrence_type"],
@@ -709,7 +822,7 @@ def occurrence_api_row(row: sqlite3.Row) -> dict[str, Any]:
         "confianca": None,
         "status_analise": data["status"],
         "cor": None,
-        "fato_observado": error_text,
+        "fato_observado": description,
         "hipotese_principal": data["technical_signature"],
         "analise_tecnica": data["technical_signature"],
         "analise_funcional": None,
@@ -807,7 +920,12 @@ def import_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "evidencias": len(payload.get("evidencias") or []),
         "diferencas": len(payload.get("diferencas_relatorio") or []),
         "testcase_hierarchy": len(payload.get("testcase_hierarchy") or []),
+        "erros_processamento": len(payload.get("erros_processamento") or []),
     }
+
+
+def _unique_count(rows: list[dict[str, Any]], key: str) -> int:
+    return len({str(row.get(key)) for row in rows if row.get(key) is not None})
 
 
 def occurrence_type(status: object) -> str:

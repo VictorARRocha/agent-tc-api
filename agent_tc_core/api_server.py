@@ -1,21 +1,47 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
+from .ai_grouping import (
+    AiGroupingError,
+    AiGroupingValidationError,
+    OpenAIResponsesClient,
+    build_ai_grouping_input,
+    make_job_id,
+    materialize_ai_rows,
+    validate_ai_grouping_response,
+    write_ai_dry_run,
+)
 from .api_repository import LocalPayloadRepository
+from .auth import AuthenticationError, SupabaseAuthValidator
 from .pipeline import run_shadow_pipeline
 
 
 class AgentTcApi:
-    def __init__(self, logs_root: str | Path, repository: Any | None = None, *, read_only: bool = False):
+    def __init__(
+        self,
+        logs_root: str | Path,
+        repository: Any | None = None,
+        *,
+        read_only: bool = False,
+        env_path: str | Path | None = None,
+        openai_client: Any | None = None,
+        auth_validator: Any | None = None,
+        require_ai_auth: bool = True,
+    ):
         self.logs_root = Path(logs_root)
         self.repository = repository or LocalPayloadRepository(self.logs_root)
         self.read_only = read_only
+        self.env_path = Path(env_path) if env_path else None
+        self.openai_client = openai_client
+        self.auth_validator = auth_validator
+        self.require_ai_auth = require_ai_auth
 
     def route_get(self, path: str, query: dict[str, list[str]]) -> tuple[int, Any]:
         parts = _path_parts(path)
@@ -45,12 +71,14 @@ class AgentTcApi:
             return HTTPStatus.OK, self.repository.rerun_requests()
         return HTTPStatus.NOT_FOUND, {"error": "not_found", "path": path}
 
-    def route_post(self, path: str, body: dict[str, Any]) -> tuple[int, Any]:
-        parts = _path_parts(path)
-        if self.read_only and parts != ["rerun-requests"]:
+    def route_post(self, path: str, body: dict[str, Any], authorization: str | None = None) -> tuple[int, Any]:
+        if self.read_only:
             return HTTPStatus.METHOD_NOT_ALLOWED, {"error": "read_only_api"}
+        parts = _path_parts(path)
         if parts == ["analyze"]:
             return self._analyze(body)
+        if len(parts) == 3 and parts[0] == "runs" and parts[2] == "ai-group":
+            return self._ai_group(parts[1], body, authorization)
         if parts == ["rerun-requests"]:
             return HTTPStatus.CREATED, self.repository.record_rerun_request(body)
         return HTTPStatus.NOT_FOUND, {"error": "not_found", "path": path}
@@ -74,11 +102,13 @@ class AgentTcApi:
                 "GET /runs/{id}/next-steps",
                 "GET /runs/{id}/performance",
                 "GET /runs/{id}/reexecutable-cases",
+                "GET /runs/{id}/ai-group-status",
                 "GET /failures/{id}/evidences",
                 "GET /testcase-hierarchy?module=contabil",
                 "GET /rerun-requests",
                 "POST /rerun-requests",
                 "POST /analyze",
+                "POST /runs/{id}/ai-group",
             ],
         }
 
@@ -105,6 +135,10 @@ class AgentTcApi:
             if hasattr(self.repository, "reexecutable_cases"):
                 return HTTPStatus.OK, self.repository.reexecutable_cases(run_id)
             return HTTPStatus.OK, []
+        if child == "ai-group-status":
+            if hasattr(self.repository, "ai_grouping_status"):
+                return HTTPStatus.OK, self.repository.ai_grouping_status(run_id)
+            return HTTPStatus.OK, {"run_id": run_id, "status": "not_supported", "grouped": False}
         return HTTPStatus.NOT_FOUND, {"error": "not_found", "child": child}
 
     def _analyze(self, body: dict[str, Any]) -> tuple[int, Any]:
@@ -139,6 +173,113 @@ class AgentTcApi:
             "testcase_hierarchy": len(payload.get("testcase_hierarchy") or []),
         }
 
+    def _ai_group(self, run_id: str, body: dict[str, Any], authorization: str | None) -> tuple[int, Any]:
+        dry_run = body.get("dry_run", True)
+        if not self.repository.run(run_id):
+            return HTTPStatus.NOT_FOUND, {"ok": False, "error": "run_not_found"}
+
+        ai_input = build_ai_grouping_input(self.repository, run_id)
+        if dry_run is True:
+            output_path = write_ai_dry_run(self.logs_root, run_id, ai_input)
+            return HTTPStatus.OK, {
+                "ok": True,
+                "dry_run": True,
+                "run_id": run_id,
+                "input_path": str(output_path),
+                "contract_version": ai_input["contract_version"],
+                "falhas": len(ai_input.get("falhas") or []),
+                "evidencias": ai_input.get("metadata", {}).get("evidences_count", 0),
+                "diferencas": ai_input.get("metadata", {}).get("differences_count", 0),
+                "message": "JSON de entrada da IA gerado. Nenhum modelo foi chamado e nada foi gravado em agrupamentos.",
+            }
+        if dry_run is not False:
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid_dry_run"}
+        if self.require_ai_auth:
+            try:
+                validator = self.auth_validator or SupabaseAuthValidator.from_env(self.env_path)
+                validator.validate(authorization)
+            except AuthenticationError as exc:
+                return HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized", "message": str(exc)}
+        if not ai_input.get("falhas"):
+            return HTTPStatus.CONFLICT, {
+                "ok": False,
+                "error": "run_without_failures",
+                "message": "A rodagem nao possui falhas para agrupar.",
+            }
+        if not all(hasattr(self.repository, name) for name in ("ai_grouping_status", "save_ai_job", "persist_ai_grouping")):
+            return HTTPStatus.NOT_IMPLEMENTED, {"ok": False, "error": "repository_does_not_support_ai_grouping"}
+
+        current = self.repository.ai_grouping_status(run_id)
+        if current.get("grouped"):
+            return HTTPStatus.CONFLICT, {
+                "ok": False,
+                "error": "already_grouped",
+                "message": "Esta rodagem ja possui agrupamento por IA.",
+                "status": current,
+            }
+        if current.get("status") == "running":
+            return HTTPStatus.CONFLICT, {
+                "ok": False,
+                "error": "already_processing",
+                "message": "O agrupamento desta rodagem ja esta em processamento.",
+                "status": current,
+            }
+
+        client = self.openai_client
+        try:
+            client = client or OpenAIResponsesClient.from_env(self.env_path)
+        except AiGroupingError as exc:
+            return HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "openai_not_configured", "message": str(exc)}
+
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        job_id = make_job_id(run_id, ai_input)
+        job = {
+            "id": job_id,
+            "run_id": run_id,
+            "provider": "openai",
+            "model": client.model,
+            "request_json": ai_input,
+            "response_json": {},
+            "status": "running",
+            "error_message": None,
+            "created_at": now,
+            "completed_at": None,
+        }
+        self.repository.save_ai_job(job)
+        try:
+            candidate, raw_response = client.group_failures(ai_input)
+            validated = validate_ai_grouping_response(candidate, ai_input)
+            rows = materialize_ai_rows(self.repository.run(run_id), job_id, validated)
+            self.repository.persist_ai_grouping(run_id, job_id, rows)
+            job.update(
+                {
+                    "response_json": {"validated": validated, "openai": raw_response},
+                    "status": "completed",
+                    "completed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                }
+            )
+            self.repository.save_ai_job(job)
+        except AiGroupingValidationError as exc:
+            job.update({"status": "invalid_response", "error_message": str(exc), "completed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+            self.repository.save_ai_job(job)
+            return HTTPStatus.UNPROCESSABLE_ENTITY, {"ok": False, "error": "invalid_ai_response", "message": str(exc), "job_id": job_id}
+        except Exception as exc:
+            job.update({"status": "failed", "error_message": str(exc)[:2000], "completed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+            self.repository.save_ai_job(job)
+            return HTTPStatus.BAD_GATEWAY, {"ok": False, "error": "ai_grouping_failed", "message": str(exc), "job_id": job_id}
+
+        return HTTPStatus.OK, {
+            "ok": True,
+            "dry_run": False,
+            "run_id": run_id,
+            "job_id": job_id,
+            "status": "completed",
+            "grupos": len(rows["groups"]),
+            "falhas": len(rows["links"]),
+            "proximos_passos": len(rows["actions"]),
+            "message": "Falhas agrupadas e gravadas com sucesso.",
+        }
+
 
 class AgentTcRequestHandler(BaseHTTPRequestHandler):
     api: AgentTcApi
@@ -157,7 +298,11 @@ class AgentTcRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             parsed = urlparse(self.path)
-            status, payload = self.api.route_post(parsed.path, self._read_json_body())
+            status, payload = self.api.route_post(
+                parsed.path,
+                self._read_json_body(),
+                self.headers.get("Authorization"),
+            )
             self._send(status, payload)
         except Exception as exc:
             self._send(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": type(exc).__name__, "message": str(exc)})
@@ -194,8 +339,20 @@ def make_server(
     repository: Any | None = None,
     *,
     read_only: bool = False,
+    env_path: str | Path | None = None,
+    openai_client: Any | None = None,
+    auth_validator: Any | None = None,
+    require_ai_auth: bool = True,
 ) -> ThreadingHTTPServer:
-    api = AgentTcApi(logs_root, repository=repository, read_only=read_only)
+    api = AgentTcApi(
+        logs_root,
+        repository=repository,
+        read_only=read_only,
+        env_path=env_path,
+        openai_client=openai_client,
+        auth_validator=auth_validator,
+        require_ai_auth=require_ai_auth,
+    )
 
     class Handler(AgentTcRequestHandler):
         pass

@@ -52,7 +52,7 @@ def main() -> int:
     parser.add_argument(
         "--read-only",
         action="store_true",
-        help="Bloqueia POST /analyze para deploy publico, mas permite POST /rerun-requests.",
+        help="Bloqueia POST /analyze e POST /rerun-requests para deploy publico.",
     )
     args = parser.parse_args()
 
@@ -68,7 +68,14 @@ def main() -> int:
         )
         repository.initialize()
 
-    server = make_server(args.host, args.port, args.logs_root, repository=repository, read_only=args.read_only)
+    server = make_server(
+        args.host,
+        args.port,
+        args.logs_root,
+        repository=repository,
+        read_only=args.read_only,
+        env_path=args.env,
+    )
     print(f"Agent TC API em http://{args.host}:{args.port}")
     print(f"backend={args.backend}")
     print(f"read_only={args.read_only}")

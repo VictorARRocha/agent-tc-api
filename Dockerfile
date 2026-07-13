@@ -12,4 +12,4 @@ ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "python cli/agent_tc_api.py --backend supabase --host ${HOST} --port ${PORT} --read-only"]
+CMD ["sh", "-c", "python cli/agent_tc_api.py --backend supabase --host ${HOST} --port ${PORT}"]

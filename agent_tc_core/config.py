@@ -51,7 +51,7 @@ def parse_run_context(
     )
     parsed = parsed.replace(tzinfo=timezone(timedelta(hours=-3)))
     stamp = parsed.strftime("%Y%m%d_%H%M%S")
-    vm = vm_name or infer_vm_from_path(folder)
+    vm = (vm_name or infer_vm_from_path(folder)).strip().lower()
     id_rodagem = f"rod_{safe_token(vm)}_{safe_token(version)}_{stamp}"
 
     return RunContext(
@@ -65,4 +65,3 @@ def parse_run_context(
         stamp=stamp,
         id_rodagem=id_rodagem,
     )
-

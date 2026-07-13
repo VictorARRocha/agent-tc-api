@@ -83,6 +83,7 @@ class SupabaseRepository:
             "uploads": 0,
             "skipped_evidence": 0,
             "upload_errors": [],
+            "deduplicated_rows": {},
         }
         if not self.url:
             raise ValueError("SUPABASE_URL nao configurada")
@@ -134,50 +135,87 @@ class SupabaseRepository:
             self.ensure_bucket()
         self.seed_modules()
 
-        self._upsert(
-            "runs",
-            [
-                {
-                    "id": run_id,
-                    "system": run.get("sistema") or module_system(module_id),
-                    "version": run.get("versao") or "",
-                    "vm_name": run.get("vm_name") or "",
-                    "module_id": module_id,
-                    "started_at": run.get("data_inicio") or now,
-                    "finished_at": None,
-                    "logs_path": run.get("caminho_logs") or "",
-                    "status": "analyzed",
-                    "total_archives": len(payload.get("falhas") or []),
-                    "total_occurrences": len(payload.get("falhas") or []),
-                    "total_executed": run.get("total_executed") if run.get("total_executed") is not None else run.get("total_analisados"),
-                    "total_ai_groups": len(payload.get("agrupamentos_shadow") or payload.get("agrupamentos") or []),
-                    "created_at": run.get("created_at") or now,
-                    "updated_at": now,
-                }
-            ],
-        )
-        self._upsert(
-            "ingestion_batches",
-            [
-                {
-                    "id": batch_id,
-                    "run_id": run_id,
-                    "source": source,
-                    "payload_sha256": payload_sha,
-                    "status": "completed" if not self.dry_run else "dry_run",
-                    "summary_json": import_summary(payload),
-                    "created_at": now,
-                    "completed_at": now,
-                }
-            ],
-        )
+        run_row = {
+            "id": run_id,
+            "system": run.get("sistema") or module_system(module_id),
+            "version": run.get("versao") or "",
+            "vm_name": str(run.get("vm_name") or "").lower(),
+            "module_id": module_id,
+            "started_at": run.get("data_inicio") or now,
+            "finished_at": None,
+            "logs_path": run.get("caminho_logs") or "",
+            "status": "processing" if not self.dry_run else "dry_run",
+            "total_archives": run.get("total_archives") if run.get("total_archives") is not None else len(payload.get("falhas") or []),
+            "total_occurrences": len(payload.get("falhas") or []),
+            "total_executed": run.get("total_executed") if run.get("total_executed") is not None else run.get("total_analisados"),
+            "total_ai_groups": len(payload.get("agrupamentos_shadow") or payload.get("agrupamentos") or []),
+            "created_at": run.get("created_at") or now,
+            "updated_at": now,
+        }
+        batch_row = {
+            "id": batch_id,
+            "run_id": run_id,
+            "source": source,
+            "payload_sha256": payload_sha,
+            "status": "processing" if not self.dry_run else "dry_run",
+            "summary_json": import_summary(payload),
+            "created_at": now,
+            "completed_at": None,
+        }
+        self._upsert("runs", [run_row])
+        self._upsert("ingestion_batches", [batch_row])
 
-        hierarchy_rows = self._import_hierarchy(payload)
-        occurrence_by_case = self._import_occurrences(payload, hierarchy_rows)
-        group_ids = self._import_ai_groups(payload)
-        self._import_group_links(payload, group_ids)
-        evidence_by_occurrence_name = self._import_evidence(payload)
-        self._import_report_differences(payload, occurrence_by_case, evidence_by_occurrence_name)
+        try:
+            hierarchy_rows = self._import_hierarchy(payload)
+            occurrence_by_case = self._import_occurrences(payload, hierarchy_rows)
+            group_ids = self._import_ai_groups(payload)
+            self._import_group_links(payload, group_ids)
+            evidence_by_occurrence_name = self._import_evidence(payload)
+            differences_written = self._import_report_differences(
+                payload,
+                occurrence_by_case,
+                evidence_by_occurrence_name,
+            )
+            expected = {
+                "occurrences": _unique_count(payload.get("falhas") or [], "id_falha"),
+                "evidence_files": len(payload.get("evidencias") or []) - self.plan["skipped_evidence"],
+                "report_differences": differences_written,
+                "ai_groups": len(group_ids),
+            }
+            verification = self._verify_run_import(run_id, expected)
+            run_row.update({"status": "analyzed", "updated_at": now_iso()})
+            batch_row.update(
+                {
+                    "status": "completed" if not self.dry_run else "dry_run",
+                    "summary_json": {
+                        **import_summary(payload),
+                        "erros_processamento": payload.get("erros_processamento") or [],
+                        "verification": verification,
+                    },
+                    "completed_at": now_iso(),
+                }
+            )
+            self._upsert("runs", [run_row])
+            self._upsert("ingestion_batches", [batch_row])
+        except Exception as exc:
+            run_row.update({"status": "import_failed", "updated_at": now_iso()})
+            batch_row.update(
+                {
+                    "status": "failed",
+                    "summary_json": {
+                        **import_summary(payload),
+                        "error": str(exc)[:2000],
+                        "erros_processamento": payload.get("erros_processamento") or [],
+                    },
+                    "completed_at": now_iso(),
+                }
+            )
+            try:
+                self._upsert("runs", [run_row])
+                self._upsert("ingestion_batches", [batch_row])
+            except Exception:
+                pass
+            raise
 
         return {
             "backend": "supabase",
@@ -193,7 +231,34 @@ class SupabaseRepository:
             "report_differences": len(payload.get("diferencas_relatorio") or []),
             "ai_groups": len(payload.get("agrupamentos_shadow") or payload.get("agrupamentos") or []),
             "plan": self.plan,
+            "verification": verification,
         }
+
+    def _verify_run_import(self, run_id: str, expected: dict[str, int]) -> dict[str, Any]:
+        if self.dry_run:
+            return {"ok": True, "dry_run": True, "expected": expected, "actual": expected}
+        actual = {
+            "occurrences": len(self._select("occurrences", {"run_id": "eq." + run_id, "select": "id"})),
+            "evidence_files": len(self._select("evidence_files", {"run_id": "eq." + run_id, "select": "id"})),
+            "report_differences": len(self._select("report_differences", {"run_id": "eq." + run_id, "select": "id"})),
+            "ai_groups": len(
+                self._select(
+                    "ai_groups",
+                    {"run_id": "eq." + run_id, "ai_analysis_job_id": "is.null", "select": "id"},
+                )
+            ),
+        }
+        mismatches = {
+            key: {"expected": expected[key], "actual": actual.get(key)}
+            for key in expected
+            if expected[key] != actual.get(key)
+        }
+        if mismatches:
+            raise RuntimeError(
+                "Verificacao pos-importacao falhou: "
+                + json.dumps(mismatches, ensure_ascii=False, sort_keys=True)
+            )
+        return {"ok": True, "expected": expected, "actual": actual}
 
     def modules(self) -> list[dict[str, Any]]:
         rows = self._select("modules", {"order": "sort_order.asc,name.asc"})
@@ -237,6 +302,56 @@ class SupabaseRepository:
     def evidences_by_failure(self, failure_id: str) -> list[dict[str, Any]]:
         rows = self._select("evidence_files", {"occurrence_id": "eq." + failure_id, "order": "file_role.asc,original_name.asc"})
         return [evidence_api_row(row) for row in rows]
+
+    def report_differences(self, run_id: str) -> list[dict[str, Any]]:
+        return self._select(
+            "report_differences",
+            {"run_id": "eq." + run_id, "order": "testcase_node_id.asc,base_file_name.asc"},
+        )
+
+    def ai_grouping_status(self, run_id: str) -> dict[str, Any]:
+        jobs = self._select(
+            "ai_analysis_jobs",
+            {"run_id": "eq." + run_id, "order": "created_at.desc", "limit": "1"},
+        )
+        real_groups = self._select(
+            "ai_groups",
+            {"run_id": "eq." + run_id, "ai_analysis_job_id": "not.is.null", "select": "id"},
+        )
+        latest = jobs[0] if jobs else None
+        return {
+            "run_id": run_id,
+            "status": latest.get("status") if latest else "not_requested",
+            "job_id": latest.get("id") if latest else None,
+            "model": latest.get("model") if latest else None,
+            "completed_at": latest.get("completed_at") if latest else None,
+            "error_message": latest.get("error_message") if latest else None,
+            "groups_count": len(real_groups),
+            "grouped": bool(real_groups) and bool(latest and latest.get("status") == "completed"),
+        }
+
+    def save_ai_job(self, row: dict[str, Any]) -> None:
+        self._upsert("ai_analysis_jobs", [row])
+
+    def persist_ai_grouping(self, run_id: str, job_id: str, rows: dict[str, list[dict[str, Any]]]) -> None:
+        groups = rows.get("groups") or []
+        links = rows.get("links") or []
+        actions = rows.get("actions") or []
+        try:
+            self._upsert("ai_groups", groups)
+            self._upsert("ai_group_occurrences", links, conflict="group_id,occurrence_id")
+            self._upsert("recommended_actions", actions)
+            self._rest_json(
+                "PATCH",
+                "/" + self._table("runs"),
+                {"total_ai_groups": len(groups), "updated_at": now_iso()},
+                query={"id": "eq." + run_id},
+                extra_headers={"Prefer": "return=minimal"},
+            )
+            self._delete("ai_groups", {"run_id": "eq." + run_id, "ai_analysis_job_id": "is.null"})
+        except Exception:
+            self._delete("ai_groups", {"ai_analysis_job_id": "eq." + job_id})
+            raise
 
     def groups(self, run_id: str) -> list[dict[str, Any]]:
         links = self.group_links(run_id)
@@ -473,7 +588,6 @@ class SupabaseRepository:
                 "module_id": module_id,
                 "testcase_node_id": case_id,
                 "testcase_name": source.get("nome_mds") or "",
-                "testcase_description": source.get("descricao") or "",
                 "group_node_id": parent_id,
                 "group_name": source.get("grupo") or "",
                 "source_archive_name": source.get("arquivo_origem") or "",
@@ -584,14 +698,14 @@ class SupabaseRepository:
         payload: dict[str, Any],
         occurrence_by_case: dict[str, str],
         evidence_by_occurrence_name: dict[tuple[str, str], str],
-    ) -> None:
+    ) -> int:
         run_id = payload["rodagem"]["id_rodagem"]
         module_id = payload["modulo"]["id_modulo"]
         now = now_iso()
         rows = []
         for source in payload.get("diferencas_relatorio") or []:
             case_id = str(source.get("id_caso_teste") or "")
-            occurrence_id = occurrence_by_case.get(case_id)
+            occurrence_id = source.get("fk_falha") or occurrence_by_case.get(case_id)
             if not occurrence_id:
                 continue
             summary = source.get("resumo_diferenca") or {}
@@ -620,6 +734,7 @@ class SupabaseRepository:
                 }
             )
         self._upsert("report_differences", rows)
+        return len(rows)
 
     def _module_by_slug(self, slug: str) -> dict[str, Any] | None:
         rows = self._select("modules", {"slug": "eq." + slug, "limit": "1"})
@@ -640,6 +755,11 @@ class SupabaseRepository:
     def _upsert(self, table: str, rows: list[dict[str, Any]], conflict: str = "id") -> None:
         if not rows:
             return
+        original_count = len(rows)
+        rows = _deduplicate_rows(rows, conflict)
+        removed = original_count - len(rows)
+        if removed:
+            self.plan["deduplicated_rows"][table] = self.plan["deduplicated_rows"].get(table, 0) + removed
         self.plan["upserts"][table] = self.plan["upserts"].get(table, 0) + len(rows)
         if self.dry_run:
             return
@@ -654,6 +774,16 @@ class SupabaseRepository:
 
     def _select(self, table: str, params: dict[str, str] | None = None) -> list[dict[str, Any]]:
         return self._rest_json("GET", "/" + self._table(table), query=params or {})
+
+    def _delete(self, table: str, params: dict[str, str]) -> None:
+        if self.dry_run:
+            return
+        self._rest_json(
+            "DELETE",
+            "/" + self._table(table),
+            query=params,
+            extra_headers={"Prefer": "return=minimal"},
+        )
 
     def _table(self, logical_name: str) -> str:
         return self.table_prefix + logical_name
@@ -766,3 +896,21 @@ def parse_bool(value: str | None, *, default: bool) -> bool:
 
 def chunks(rows: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
     return [rows[index : index + size] for index in range(0, len(rows), size)]
+
+
+def _deduplicate_rows(rows: list[dict[str, Any]], conflict: str) -> list[dict[str, Any]]:
+    keys = [key.strip() for key in conflict.split(",") if key.strip()]
+    if not keys:
+        return rows
+    by_key: dict[tuple[Any, ...], dict[str, Any]] = {}
+    order: list[tuple[Any, ...]] = []
+    for row in rows:
+        identity = tuple(row.get(key) for key in keys)
+        if identity not in by_key:
+            order.append(identity)
+        by_key[identity] = row
+    return [by_key[identity] for identity in order]
+
+
+def _unique_count(rows: list[dict[str, Any]], key: str) -> int:
+    return len({str(row.get(key)) for row in rows if row.get(key) is not None})
