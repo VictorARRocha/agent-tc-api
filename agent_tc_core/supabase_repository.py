@@ -493,6 +493,35 @@ class SupabaseRepository:
         self._upsert("rerun_requests", [row])
         return row
 
+    def cancel_rerun_request(self, request_id: str, request: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        rows = self._select("rerun_requests", {"id": "eq." + request_id, "limit": "1"})
+        if not rows:
+            return None
+        current = rows[0]
+        if _rerun_request_is_terminal(current):
+            return {
+                "error": "rerun_request_not_cancellable",
+                "id": request_id,
+                "status": current.get("status"),
+                "execution_status": current.get("execution_status"),
+                "message": "Esta rodagem Jenkins ja esta finalizada ou cancelada.",
+            }
+        reason = (request or {}).get("reason") or (request or {}).get("motivo") or "Cancelamento solicitado pelo dashboard."
+        row = {
+            "status": "cancel_requested",
+            "execution_status": "cancel_requested",
+            "error_message": str(reason)[:1000],
+            "updated_at": now_iso(),
+        }
+        updated = self._rest_json(
+            "PATCH",
+            "/" + self._table("rerun_requests"),
+            row,
+            query={"id": "eq." + request_id},
+            extra_headers={"Prefer": "return=representation"},
+        )
+        return updated[0] if updated else None
+
     def ensure_bucket(self) -> None:
         if self.dry_run:
             return
@@ -991,3 +1020,17 @@ def _ai_response_debug(response: Any) -> dict[str, Any]:
     if isinstance(validated, dict):
         out["validated_clusters"] = len(validated.get("clusters") or [])
     return out
+
+
+def _rerun_request_is_terminal(row: dict[str, Any]) -> bool:
+    terminal = {
+        "cancelado",
+        "finalizado",
+        "finalizado_sucesso",
+        "finalizado_falha",
+        "erro",
+        "erro_envio",
+    }
+    status = str(row.get("status") or "").lower()
+    execution_status = str(row.get("execution_status") or "").lower()
+    return status in terminal or execution_status in terminal

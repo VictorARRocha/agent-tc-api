@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from agent_tc_core.config import RunContext, parse_run_context
+from agent_tc_core.api_server import AgentTcApi
 from agent_tc_core.payload import failure_id
 from agent_tc_core.sqlite_repository import SQLiteRepository
 from agent_tc_core.supabase_repository import _deduplicate_rows
@@ -68,6 +69,53 @@ class PipelineRegressionTests(unittest.TestCase):
             self.assertEqual(["failure-1", "failure-2"], [row["occurrence_id"] for row in rows])
             self.assertEqual("completed", batch["status"])
             self.assertIn('"verification"', batch["summary_json"])
+
+    def test_api_marks_rerun_request_for_cancel(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            repository = SQLiteRepository(Path(temp_dir) / "agent-tc.sqlite")
+            api = AgentTcApi(Path(temp_dir), repository=repository)
+
+            status, created = api.route_post(
+                "/rerun-requests",
+                {
+                    "id": "rerun-1",
+                    "vm_name": "a08",
+                    "version": "PROXIMA",
+                    "casos_teste": "[3]",
+                },
+            )
+            self.assertEqual(201, status)
+            self.assertEqual("requested", created["status"])
+
+            status, payload = api.route_post(
+                "/rerun-requests/rerun-1/cancel",
+                {"reason": "Rodagem enviada errada."},
+            )
+            self.assertEqual(202, status)
+            self.assertTrue(payload["ok"])
+            self.assertEqual("cancel_requested", payload["rerun_request"]["status"])
+            self.assertEqual("cancel_requested", payload["rerun_request"]["execution_status"])
+
+    def test_api_rejects_cancel_for_finished_rerun_request(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            repository = SQLiteRepository(Path(temp_dir) / "agent-tc.sqlite")
+            api = AgentTcApi(Path(temp_dir), repository=repository)
+            api.route_post(
+                "/rerun-requests",
+                {
+                    "id": "rerun-2",
+                    "vm_name": "a08",
+                    "version": "PROXIMA",
+                    "casos_teste": "[3]",
+                    "status": "finalizado",
+                },
+            )
+
+            status, payload = api.route_post("/rerun-requests/rerun-2/cancel", {})
+
+            self.assertEqual(409, status)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("rerun_request_not_cancellable", payload["error"])
 
 
 def _payload_with_repeated_case():

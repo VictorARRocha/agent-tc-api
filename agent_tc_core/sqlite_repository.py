@@ -508,6 +508,35 @@ class SQLiteRepository:
             conn.commit()
         return row
 
+    def cancel_rerun_request(self, request_id: str, request: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        self.initialize()
+        with self.connect() as conn:
+            current = conn.execute("SELECT * FROM rerun_requests WHERE id = ?", (request_id,)).fetchone()
+            if not current:
+                return None
+            current_dict = dict(current)
+            if rerun_request_is_terminal(current_dict):
+                return {
+                    "error": "rerun_request_not_cancellable",
+                    "id": request_id,
+                    "status": current_dict.get("status"),
+                    "execution_status": current_dict.get("execution_status"),
+                    "message": "Esta rodagem Jenkins ja esta finalizada ou cancelada.",
+                }
+            reason = (request or {}).get("reason") or (request or {}).get("motivo") or "Cancelamento solicitado pelo dashboard."
+            now = now_iso()
+            conn.execute(
+                """
+                UPDATE rerun_requests
+                SET status = ?, execution_status = ?, error_message = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                ("cancel_requested", "cancel_requested", str(reason)[:1000], now, request_id),
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM rerun_requests WHERE id = ?", (request_id,)).fetchone()
+        return dict(row) if row else None
+
     def _import_hierarchy(
         self,
         conn: sqlite3.Connection,
@@ -1118,3 +1147,17 @@ def json_value(value: Any, default: Any) -> Any:
     if isinstance(value, (list, dict)):
         return value
     return json.loads(value)
+
+
+def rerun_request_is_terminal(row: dict[str, Any]) -> bool:
+    terminal = {
+        "cancelado",
+        "finalizado",
+        "finalizado_sucesso",
+        "finalizado_falha",
+        "erro",
+        "erro_envio",
+    }
+    status = str(row.get("status") or "").lower()
+    execution_status = str(row.get("execution_status") or "").lower()
+    return status in terminal or execution_status in terminal

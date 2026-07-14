@@ -82,6 +82,15 @@ class AgentTcApi:
             return self._ai_group(parts[1], body, authorization)
         if parts == ["rerun-requests"]:
             return HTTPStatus.CREATED, self.repository.record_rerun_request(body)
+        if len(parts) == 3 and parts[0] == "rerun-requests" and parts[2] == "cancel":
+            if not hasattr(self.repository, "cancel_rerun_request"):
+                return HTTPStatus.NOT_IMPLEMENTED, {"ok": False, "error": "repository_does_not_support_cancel"}
+            result = self.repository.cancel_rerun_request(parts[1], body)
+            if result is None:
+                return HTTPStatus.NOT_FOUND, {"ok": False, "error": "rerun_request_not_found"}
+            if isinstance(result, dict) and result.get("error") == "rerun_request_not_cancellable":
+                return HTTPStatus.CONFLICT, {"ok": False, **result}
+            return HTTPStatus.ACCEPTED, {"ok": True, "rerun_request": result}
         return HTTPStatus.NOT_FOUND, {"error": "not_found", "path": path}
 
     def index(self) -> dict[str, Any]:
@@ -109,6 +118,7 @@ class AgentTcApi:
                 "GET /testcase-hierarchy?module=contabil",
                 "GET /rerun-requests",
                 "POST /rerun-requests",
+                "POST /rerun-requests/{id}/cancel",
                 "POST /analyze",
                 "POST /runs/{id}/ai-group",
             ],
