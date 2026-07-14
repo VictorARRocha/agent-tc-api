@@ -13,16 +13,27 @@ class PerformanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "Tempos Folha.txt"
             path.write_text(
-                "1.10.20.3 - 00:00:33 MAIS LENTO ---------------- Planilha: 00:04:59 | Atual: 00:05:32\n",
+                "\n".join(
+                    [
+                        "1.10.20.3 - 00:00:33 MAIS LENTO ---------------- Planilha: 00:04:59 | Atual: 00:05:32",
+                        "2.5.1.3.1 - 00:01:22 MAIS RµPIDO ---------------- Planilha: 00:04:59 | Atual: 00:03:37",
+                    ]
+                ),
                 encoding="utf-8",
             )
             rows = parse_times_file(path)
 
-        self.assertEqual(1, len(rows))
+        self.assertEqual(2, len(rows))
         self.assertEqual("1.10.20.3", rows[0].testcase_node_id)
         self.assertEqual(299, rows[0].expected_seconds)
         self.assertEqual(332, rows[0].actual_seconds)
         self.assertEqual(33, rows[0].delay_seconds)
+        self.assertEqual("mais_lento", rows[0].status)
+        self.assertEqual("2.5.1.3.1", rows[1].testcase_node_id)
+        self.assertEqual(299, rows[1].expected_seconds)
+        self.assertEqual(217, rows[1].actual_seconds)
+        self.assertEqual(-82, rows[1].delay_seconds)
+        self.assertEqual("mais_rapido", rows[1].status)
 
     def test_sqlite_imports_run_delays(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:

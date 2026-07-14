@@ -10,7 +10,7 @@ from .config import RunContext
 
 
 TIME_LINE_RE = re.compile(
-    r"^(?P<case>\d+(?:\.\d+)*)\s+-\s+(?P<delay>\d{2}:\d{2}:\d{2})\s+MAIS\s+LENTO\s+-+\s+"
+    r"^(?P<case>\d+(?:\.\d+)*)\s+-\s+(?P<delta>\d{2}:\d{2}:\d{2})\s+MAIS\s+(?P<kind>LENTO|R.PIDO)\s+-+\s+"
     r"Planilha:\s+(?P<expected>\d{2}:\d{2}:\d{2})\s+\|\s+Atual:\s+(?P<actual>\d{2}:\d{2}:\d{2})",
     re.IGNORECASE,
 )
@@ -22,6 +22,7 @@ class DelayRow:
     expected_seconds: int
     actual_seconds: int
     delay_seconds: int
+    status: str
     source_file: str
 
 
@@ -51,8 +52,13 @@ def parse_times_file(path: str | Path) -> list[DelayRow]:
             continue
         expected = hms_to_seconds(match.group("expected"))
         actual = hms_to_seconds(match.group("actual"))
-        delay = hms_to_seconds(match.group("delay"))
-        if actual <= expected:
+        delta = hms_to_seconds(match.group("delta"))
+        is_fast = "PIDO" in match.group("kind").upper()
+        status = "mais_rapido" if is_fast else "mais_lento"
+        delay = -delta if is_fast else delta
+        if status == "mais_lento" and actual <= expected:
+            continue
+        if status == "mais_rapido" and actual >= expected:
             continue
         rows.append(
             DelayRow(
@@ -60,6 +66,7 @@ def parse_times_file(path: str | Path) -> list[DelayRow]:
                 expected_seconds=expected,
                 actual_seconds=actual,
                 delay_seconds=delay,
+                status=status,
                 source_file=path.name,
             )
         )
@@ -99,12 +106,12 @@ def build_delay_payload_rows(
                 "tempo_padrao_segundos": delay.expected_seconds,
                 "tempo_atual_segundos": delay.actual_seconds,
                 "delay_segundos": delay.delay_seconds,
-                "status": "mais_lento",
+                "status": delay.status,
                 "arquivo_origem": delay.source_file,
                 "created_at": created_at,
             }
         )
-    return sorted(out, key=lambda row: (-int(row["delay_segundos"]), str(row["codigo_teste"])))
+    return sorted(out, key=lambda row: (-abs(int(row["delay_segundos"])), str(row["codigo_teste"])))
 
 
 def hms_to_seconds(value: str) -> int:
