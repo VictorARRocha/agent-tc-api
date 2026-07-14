@@ -952,12 +952,19 @@ def hierarchy_api_row(row: sqlite3.Row) -> dict[str, Any]:
 
 def delay_api_row(row: sqlite3.Row) -> dict[str, Any]:
     data = dict(row)
+    expected = data["expected_seconds"] or 0
+    delay = data["delay_seconds"] or 0
+    variation_pct = (delay / expected * 100) if expected else 0.0
     return {
         **data,
         "id_atraso": data["id"],
         "fk_rodagem": data["run_id"],
         "codigo_teste": data["testcase_node_id"],
         "nome_teste": data["testcase_name"],
+        "tempo_padrao_segundos": data["expected_seconds"],
+        "tempo_atual_segundos": data["actual_seconds"],
+        "delay_segundos": data["delay_seconds"],
+        "variacao_pct": variation_pct,
         "tempo_padrao": seconds_to_hms(data["expected_seconds"]),
         "tempo_atual": seconds_to_hms(data["actual_seconds"]),
         "delay_detectado": seconds_to_hms(data["delay_seconds"]),

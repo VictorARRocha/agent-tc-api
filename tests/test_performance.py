@@ -63,6 +63,8 @@ class PerformanceTests(unittest.TestCase):
 
         self.assertEqual(1, len(rows))
         self.assertEqual("1.10.20.3", rows[0]["codigo_teste"])
+        self.assertEqual(33, rows[0]["delay_segundos"])
+        self.assertAlmostEqual(11.036, rows[0]["variacao_pct"], places=2)
         self.assertEqual("00:00:33", rows[0]["delay_detectado"])
 
 
