@@ -4,9 +4,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tc_core.config import RunContext, parse_run_context
 from agent_tc_core.api_server import AgentTcApi
+from agent_tc_core.config import RunContext, parse_run_context
 from agent_tc_core.payload import failure_id
+from agent_tc_core.pipeline import build_archive_integrity, read_occurrence_totals_from_run_folder
 from agent_tc_core.sqlite_repository import SQLiteRepository
 from agent_tc_core.supabase_repository import _deduplicate_rows
 
@@ -43,6 +44,24 @@ class PipelineRegressionTests(unittest.TestCase):
         result = _deduplicate_rows(rows, "id")
         self.assertEqual(2, len(result))
         self.assertEqual(2, result[0]["value"])
+
+    def test_reads_tc_occurrence_totals_and_compares_archives(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir)
+            (folder / "TotalOcorrenciasTC.txt").write_text(
+                "wpSomaErros=7\nwpSomaDiferencas=3\n",
+                encoding="utf-8",
+            )
+
+            totals = read_occurrence_totals_from_run_folder(folder)
+            integrity = build_archive_integrity(totals, total_archives=8)
+
+        self.assertEqual({"total_erros_tc": 7, "total_diferencas_tc": 3}, totals)
+        self.assertEqual(10, integrity["total_ocorrencias_tc"])
+        self.assertEqual(8, integrity["total_compactados"])
+        self.assertFalse(integrity["compactacao_completa"])
+        self.assertEqual(2, integrity["ocorrencias_sem_compactado"])
+        self.assertEqual(0, integrity["compactados_extras"])
 
     def test_sqlite_imports_repeated_case_and_exact_difference_links(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
