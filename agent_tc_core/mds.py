@@ -21,7 +21,7 @@ class CaseInfo:
     procedure_name: str
 
 
-NODE_RE = re.compile(r"^\[(?P<id>\d+(?:\.\d+)*)\]\s*(?P<name>.*)$")
+NODE_RE = re.compile(r"^[^\[]*\[(?P<id>\d+(?:\.\d+)*)\]\s*(?P<name>.*)$")
 
 
 def module_for_node_id(node_id: str) -> dict[str, str]:

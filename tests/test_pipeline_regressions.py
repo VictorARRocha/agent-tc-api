@@ -120,6 +120,19 @@ class PipelineRegressionTests(unittest.TestCase):
         self.assertEqual("Practice", {row["sistema"] for row in rows}.pop())
         self.assertEqual(5, len(rows))
 
+    def test_mds_reads_practice_items_with_marker_before_id(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir)
+            mds = folder / "Practice Base Unificada.mds"
+            mds.write_text(
+                '<Project><Node name="[19] Practice"><Node name="[19.2] Folha"><Node name="*[19.2.3.1] Rescisao complementar" /></Node></Node></Project>',
+                encoding="utf-8",
+            )
+
+            collection = MdsCollection([mds])
+
+        self.assertEqual("Rescisao complementar", collection.case_info("19.2.3.1").nome_mds)
+
     def test_splits_repeated_and_semicolon_mds_paths(self):
         paths = split_mds_paths(["a.mds;b.mds", "c.mds"])
         self.assertEqual(["a.mds", "b.mds", "c.mds"], [str(path) for path in paths])
