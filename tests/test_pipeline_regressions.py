@@ -6,13 +6,16 @@ from pathlib import Path
 
 from agent_tc_core.api_server import AgentTcApi
 from agent_tc_core.config import RunContext, parse_run_context
+from agent_tc_core.constants import STATUS_QUEBRA
+from agent_tc_core.extractor import ArchiveInfo
+from agent_tc_core.mds import CaseInfo, MdsCollection, split_mds_paths
+from agent_tc_core.parser import analyze_failure
 from agent_tc_core.payload import failure_id
 from agent_tc_core.pipeline import (
     build_archive_integrity,
     read_occurrence_totals_from_project_suite,
     read_occurrence_totals_from_run_folder,
 )
-from agent_tc_core.mds import MdsCollection, split_mds_paths
 from agent_tc_core.project_suite import ProjectSuiteVariables
 from agent_tc_core.sqlite_repository import SQLiteRepository
 from agent_tc_core.supabase_repository import _deduplicate_rows
@@ -164,6 +167,42 @@ class PipelineRegressionTests(unittest.TestCase):
             collection = MdsCollection([mds])
 
         self.assertEqual("Rescisao complementar", collection.case_info("19.2.3.1").nome_mds)
+
+    def test_practice_logerro_txt_marks_test_break(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir)
+            archive_path = folder / "19.0.3 - 02-07-2026 20_28_41.RAR"
+            archive_path.write_bytes(b"rar")
+            extracted = folder / "extracted"
+            extracted.mkdir()
+            (extracted / "logErro.txt").write_text("Erro no Practice", encoding="utf-8")
+
+            analysis = analyze_failure(
+                archive=ArchiveInfo(
+                    path=archive_path,
+                    nome_arquivo=archive_path.name,
+                    extensao=".rar",
+                    tamanho_bytes=3,
+                    modificado_em="2026-07-02T20:28:41",
+                    id_caso_teste="19.0.3",
+                    id_valido=True,
+                ),
+                extracted_dir=extracted,
+                case_info=CaseInfo(
+                    id_caso_teste="19.0.3",
+                    nome_mds="Caso Practice",
+                    grupo="Practice",
+                    descricao="",
+                    test_moniker="",
+                    caminho_hierarquico="Practice > Caso Practice",
+                    script_name="",
+                    procedure_name="",
+                ),
+            )
+
+        self.assertEqual(STATUS_QUEBRA, analysis.status)
+        self.assertEqual("Erro no Practice", analysis.erro_resumo)
+        self.assertTrue(any(evidence.path.name == "logErro.txt" for evidence in analysis.evidences))
 
     def test_splits_repeated_and_semicolon_mds_paths(self):
         paths = split_mds_paths(["a.mds;b.mds", "c.mds"])

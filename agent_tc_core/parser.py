@@ -128,7 +128,7 @@ def analyze_failure(
     case_info: CaseInfo,
 ) -> FailureAnalysis:
     files = [path for path in extracted_dir.rglob("*") if path.is_file()]
-    info_errors = [path for path in files if path.name.lower() == "informacaoerro.txt"]
+    info_errors = [path for path in files if path.name.lower() in ERROR_FILE_NAMES]
     comparisons = find_comparisons(files)
     has_info_error = bool(info_errors)
     has_comparison = bool(comparisons)
@@ -210,4 +210,3 @@ def analyze_failure(
 
 def mime_for(path: Path) -> str:
     return mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-

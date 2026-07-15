@@ -37,4 +37,4 @@ TEXT_EXTENSIONS = {".txt", ".log", ".csv", ".xml", ".htm", ".html", ".ini"}
 BASE_MARKERS = ("_antigo", "_base", "_padrao", "_padr\u00e3o", "_esperado")
 CURRENT_MARKERS = ("_atual", "_atualizado", "_gerado")
 
-ERROR_FILE_NAMES = {"informacaoerro.txt", "erro.txt", "callstack.txt"}
+ERROR_FILE_NAMES = {"informacaoerro.txt", "logerro.txt", "erro.txt", "callstack.txt"}
