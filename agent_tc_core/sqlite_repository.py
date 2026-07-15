@@ -592,6 +592,7 @@ class SQLiteRepository:
                 "module_id": module_id,
                 "testcase_node_id": case_id,
                 "testcase_name": source.get("nome_mds") or "",
+                "testcase_description": source.get("descricao") or "",
                 "group_node_id": parent_id,
                 "group_name": source.get("grupo") or "",
                 "source_archive_name": source.get("arquivo_origem") or "",
@@ -599,7 +600,7 @@ class SQLiteRepository:
                 "occurrence_type": occurrence_type(status),
                 "status": status,
                 "error_message": source.get("erro_resumo") or "",
-                "log_summary": source.get("erro_resumo") or source.get("descricao") or "",
+                "log_summary": source.get("erro_resumo") or "",
                 "technical_signature": source.get("procedure_name") or "",
                 "created_at": source.get("created_at") or now,
                 "updated_at": now,
@@ -856,7 +857,9 @@ def run_api_row(row: sqlite3.Row) -> dict[str, Any]:
 def occurrence_api_row(row: sqlite3.Row) -> dict[str, Any]:
     data = dict(row)
     module_slug = SLUG_BY_MODULE_ID.get(data["module_id"]) or ""
-    description = data["log_summary"] or data["error_message"] or data["testcase_name"]
+    case_description = data.get("testcase_description") or ""
+    observed_description = data["log_summary"] or data["error_message"] or ""
+    description = observed_description or case_description or data["testcase_name"]
     return {
         **data,
         "id_falha": data["id"],
@@ -879,11 +882,11 @@ def occurrence_api_row(row: sqlite3.Row) -> dict[str, Any]:
         "caso_teste_provavel": data["testcase_name"],
         "subgrupo": None,
         "rotina_funcional": data["group_name"],
-        "descricao_caso": description,
+        "descricao_caso": case_description,
         "confianca_associacao": None,
         "erro_titulo": data["testcase_name"],
-        "erro_principal": data["error_message"] or description,
-        "mensagem_principal": data["error_message"] or description,
+        "erro_principal": data["error_message"] or observed_description,
+        "mensagem_principal": data["error_message"] or observed_description,
         "trecho_relevante": None,
         "call_stack_resumido": data["error_message"],
         "tipo_tecnico": data["occurrence_type"],
@@ -895,7 +898,7 @@ def occurrence_api_row(row: sqlite3.Row) -> dict[str, Any]:
         "confianca": None,
         "status_analise": data["status"],
         "cor": None,
-        "fato_observado": description,
+        "fato_observado": observed_description,
         "hipotese_principal": data["technical_signature"],
         "analise_tecnica": data["technical_signature"],
         "analise_funcional": None,

@@ -51,7 +51,7 @@ Campos:
 - `status`: texto.
 - `total_archives`: inteiro.
 - `total_occurrences`: inteiro.
-- `total_executed`: inteiro nullable. Total real executado vindo de `wpSomaCasosExecutados` no `Unico.mds`.
+- `total_executed`: inteiro nullable. Total real executado vindo de `TotalTestesRodados.txt`, `wpSomaCasosExecutados` no `.mds` ou `wpSomaCasosExecutados` no `.pjs` do ProjectSuite.
 - `total_ai_groups`: inteiro.
 - `created_at`: timestamp.
 - `updated_at`: timestamp.
@@ -103,6 +103,7 @@ Campos:
 - `module_id`: FK para `modules.id`.
 - `testcase_node_id`: texto. Ex.: `3.1.3.8`.
 - `testcase_name`: texto.
+- `testcase_description`: texto nullable. Descricao real do caso vinda do `.mds`.
 - `group_node_id`: texto nullable.
 - `group_name`: texto nullable.
 - `source_archive_name`: texto.

@@ -41,15 +41,21 @@ def infer_version_from_mds_path(mds_path: str | Path) -> str:
     return "SEM_VERSAO"
 
 
-def is_practice_context(mds_path: str | Path) -> bool:
-    return "practice" in str(mds_path).lower()
+def is_legacy_system_context(mds_path: str | Path) -> bool:
+    raw = str(mds_path).lower()
+    return (
+        "practice" in raw
+        or "suprema" in raw
+        or "integracoes" in raw
+        or "integrações" in raw
+    )
 
 
 def normalize_run_version(raw_version: str, mds_path: str | Path) -> str:
     version = raw_version.strip()
     if not version:
         return infer_version_from_mds_path(mds_path)
-    if is_practice_context(mds_path):
+    if is_legacy_system_context(mds_path):
         matches = LEGACY_VERSION_RE.findall(version)
         if matches:
             return matches[-1]

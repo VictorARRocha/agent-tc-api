@@ -176,7 +176,7 @@ def build_shadow_payload(
                 "grupo": failure.case_info.grupo,
                 "mensagem_erro": failure.erro_resumo,
                 "resumo_log": failure.erro_resumo
-                or "Sem InformacaoErro.txt detectado pelo Python.",
+                or "Sem arquivo de erro textual detectado pelo Python.",
                 "resumo_diferenca": resumo_diferenca,
                 "sinais": {
                     "tipo_detectado_python": failure.status,

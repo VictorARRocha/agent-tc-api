@@ -75,6 +75,20 @@ class PipelineRegressionTests(unittest.TestCase):
         self.assertEqual("SUPREMA", context.versao)
         self.assertEqual("rod_a03_SUPREMA_20260715_143000", context.id_rodagem)
 
+    def test_suprema_run_folder_uses_legacy_version_token(self):
+        context = parse_run_context(
+            run_folder=(
+                r"S:\Teste automatico\Arquivos\Arquivos De Log\ArquivosCompactados\A03"
+                r"\Suprema 8.30a 15_07_2026 14_30_00"
+            ),
+            mds_path=r"C:\TC\tc12\PROJETO-TC12\Integracoes\Integracoes.mds",
+            output_root=r"S:\Teste automatico\Arquivos\AgenteTC\logs",
+            vm_name="a03",
+        )
+
+        self.assertEqual("8.30a", context.versao)
+        self.assertEqual("rod_a03_8.30a_20260715_143000", context.id_rodagem)
+
     def test_failure_id_uses_archive_identity(self):
         context = RunContext(
             run_folder=Path("."),
@@ -244,7 +258,11 @@ class PipelineRegressionTests(unittest.TestCase):
             run = repository.run(payload["rodagem"]["id_rodagem"])
             self.assertEqual("analyzed", run["status"])
             self.assertEqual("a08", run["vm_name"])
-            self.assertEqual(2, len(repository.failures(run["id"])))
+            imported_failures = repository.failures(run["id"])
+            self.assertEqual(2, len(imported_failures))
+            first_failure = {row["id_falha"]: row for row in imported_failures}["failure-1"]
+            self.assertEqual("Descricao real do caso no mds", first_failure["descricao_caso"])
+            self.assertEqual("Mensagem de erro observada", first_failure["erro_principal"])
 
             conn = repository.connect()
             try:
@@ -316,15 +334,17 @@ def _payload_with_repeated_case():
             "id_caso_teste": "3.1.8.1.5.6",
             "nome_mds": "Caso repetido",
             "grupo": "Grupo",
+            "descricao": "Descricao real do caso no mds",
             "arquivo_origem": "caso-09.rar",
             "tipo_detectado_python": "Diferenca",
-            "erro_resumo": "",
+            "erro_resumo": "Mensagem de erro observada",
         },
         {
             "id_falha": "failure-2",
             "id_caso_teste": "3.1.8.1.5.6",
             "nome_mds": "Caso repetido",
             "grupo": "Grupo",
+            "descricao": "Descricao real do caso no mds",
             "arquivo_origem": "caso-10.rar",
             "tipo_detectado_python": "Diferenca",
             "erro_resumo": "",
