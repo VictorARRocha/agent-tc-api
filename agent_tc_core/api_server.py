@@ -171,6 +171,7 @@ class AgentTcApi:
             mds_path=mds_path,
             output_root=output_root,
             vm_name=body.get("vm_name"),
+            project_suite_path=body.get("project_suite_path") or body.get("project_suite"),
         )
         import_result = None
         if hasattr(self.repository, "import_payload"):

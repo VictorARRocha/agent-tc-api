@@ -30,6 +30,7 @@ def main() -> int:
     )
     parser.add_argument("--vm", help="Nome da VM. Se omitido, infere pelo caminho da rodagem.")
     parser.add_argument("--times-folder", help="Pasta opcional com arquivos Tempos *.txt.")
+    parser.add_argument("--project-suite", help="Caminho opcional do ProjectSuite .pjs.")
     parser.add_argument("--backend", choices=["supabase", "sqlite"], default="supabase")
     parser.add_argument("--env", default=str(PROJECT_ROOT / ".env"))
     parser.add_argument("--sqlite-db", default=str(PROJECT_ROOT / "data" / "agent_tc.sqlite"))
@@ -42,6 +43,7 @@ def main() -> int:
         output_root=args.output_root,
         vm_name=args.vm,
         times_folder=args.times_folder,
+        project_suite_path=args.project_suite,
     )
 
     if args.backend == "sqlite":

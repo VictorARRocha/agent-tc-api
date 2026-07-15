@@ -8,6 +8,7 @@ from .extractor import ArchiveExtractionError, extract_archive, find_extractor, 
 from .mds import MdsCollection, split_mds_paths
 from .parser import analyze_failure
 from .performance import parse_times_folder
+from .project_suite import ProjectSuiteVariables
 from .payload import build_shadow_payload
 from .reporter import write_shadow_reports
 
@@ -51,6 +52,25 @@ def read_occurrence_totals_from_run_folder(run_folder: Path) -> dict[str, int] |
         return None
 
     return {
+        "arquivo_origem": TOTAL_OCCURRENCES_FILE,
+        "total_erros_tc": total_errors or 0,
+        "total_diferencas_tc": total_differences or 0,
+    }
+
+
+def read_occurrence_totals_from_project_suite(
+    project_suite: ProjectSuiteVariables | None,
+) -> dict[str, int] | None:
+    if project_suite is None:
+        return None
+
+    total_errors = project_suite.project_variable_int("wpSomaErros")
+    total_differences = project_suite.project_variable_int("wpSomaDiferencas")
+    if total_errors is None and total_differences is None:
+        return None
+
+    return {
+        "arquivo_origem": str(project_suite.project_suite_path),
         "total_erros_tc": total_errors or 0,
         "total_diferencas_tc": total_differences or 0,
     }
@@ -69,7 +89,7 @@ def build_archive_integrity(
     missing_archives = max(0, total_occurrences - total_archives)
     extra_archives = max(0, total_archives - total_occurrences)
     return {
-        "arquivo_origem": TOTAL_OCCURRENCES_FILE,
+        "arquivo_origem": occurrence_totals.get("arquivo_origem") or TOTAL_OCCURRENCES_FILE,
         "total_erros_tc": total_errors,
         "total_diferencas_tc": total_differences,
         "total_ocorrencias_tc": total_occurrences,
@@ -103,6 +123,7 @@ def run_shadow_pipeline(
     output_root: str | Path,
     vm_name: str | None = None,
     times_folder: str | Path | None = None,
+    project_suite_path: str | Path | None = None,
 ) -> tuple[Path, dict[str, object]]:
     mds_paths = split_mds_paths(mds_path)
     context = parse_run_context(
@@ -117,13 +138,22 @@ def run_shadow_pipeline(
     missing_mds_paths = [path for path in mds_paths if not path.exists()]
     if missing_mds_paths:
         raise FileNotFoundError("Arquivo .mds nao encontrado: " + "; ".join(str(path) for path in missing_mds_paths))
+    project_suite = None
+    if project_suite_path:
+        project_suite_file = Path(project_suite_path)
+        if not project_suite_file.exists():
+            raise FileNotFoundError("ProjectSuite .pjs nao encontrado: " + str(project_suite_file))
+        project_suite = ProjectSuiteVariables(project_suite_file)
 
     extractor = find_extractor()
     archives = inventory_archives(context.run_folder)
     if not archives:
         raise RuntimeError("Nenhum RAR/ZIP encontrado em: " + str(context.run_folder))
+    occurrence_totals = read_occurrence_totals_from_run_folder(context.run_folder)
+    if occurrence_totals is None:
+        occurrence_totals = read_occurrence_totals_from_project_suite(project_suite)
     archive_integrity = build_archive_integrity(
-        read_occurrence_totals_from_run_folder(context.run_folder),
+        occurrence_totals,
         len(archives),
     )
 
@@ -183,6 +213,8 @@ def run_shadow_pipeline(
             )
 
     total_executed = read_total_tests_from_run_folder(context.run_folder)
+    if total_executed is None and project_suite is not None:
+        total_executed = project_suite.project_variable_int("wpSomaCasosExecutados")
     if total_executed is None:
         total_executed = mds.project_variable_int("wpSomaCasosExecutados")
     if archive_integrity and not archive_integrity["compactacao_completa"]:

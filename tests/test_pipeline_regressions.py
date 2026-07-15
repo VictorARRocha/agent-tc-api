@@ -7,8 +7,13 @@ from pathlib import Path
 from agent_tc_core.api_server import AgentTcApi
 from agent_tc_core.config import RunContext, parse_run_context
 from agent_tc_core.payload import failure_id
-from agent_tc_core.pipeline import build_archive_integrity, read_occurrence_totals_from_run_folder
+from agent_tc_core.pipeline import (
+    build_archive_integrity,
+    read_occurrence_totals_from_project_suite,
+    read_occurrence_totals_from_run_folder,
+)
 from agent_tc_core.mds import MdsCollection, split_mds_paths
+from agent_tc_core.project_suite import ProjectSuiteVariables
 from agent_tc_core.sqlite_repository import SQLiteRepository
 from agent_tc_core.supabase_repository import _deduplicate_rows
 
@@ -57,12 +62,41 @@ class PipelineRegressionTests(unittest.TestCase):
             totals = read_occurrence_totals_from_run_folder(folder)
             integrity = build_archive_integrity(totals, total_archives=8)
 
-        self.assertEqual({"total_erros_tc": 7, "total_diferencas_tc": 3}, totals)
+        self.assertEqual(7, totals["total_erros_tc"])
+        self.assertEqual(3, totals["total_diferencas_tc"])
+        self.assertEqual("TotalOcorrenciasTC.txt", totals["arquivo_origem"])
         self.assertEqual(10, integrity["total_ocorrencias_tc"])
         self.assertEqual(8, integrity["total_compactados"])
         self.assertFalse(integrity["compactacao_completa"])
         self.assertEqual(2, integrity["ocorrencias_sem_compactado"])
         self.assertEqual(0, integrity["compactados_extras"])
+
+    def test_reads_practice_project_suite_variables(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pjs = Path(temp_dir) / "TestesVisualPractice.pjs"
+            pjs.write_text(
+                """<?xml version="1.0" encoding="UTF-8"?>
+<Root>
+  <variables>
+    <data>
+      <Items>
+        <Variable Name="wpSomaErros"><DefValue IntValue="4" /></Variable>
+        <Variable Name="wpSomaDiferencas"><DefValue IntValue="6" /></Variable>
+        <Variable Name="wpSomaCasosExecutados"><DefValue IntValue="42" /></Variable>
+      </Items>
+    </data>
+  </variables>
+</Root>""",
+                encoding="utf-8",
+            )
+
+            project_suite = ProjectSuiteVariables(pjs)
+            totals = read_occurrence_totals_from_project_suite(project_suite)
+
+        self.assertEqual(42, project_suite.project_variable_int("wpSomaCasosExecutados"))
+        self.assertEqual(4, totals["total_erros_tc"])
+        self.assertEqual(6, totals["total_diferencas_tc"])
+        self.assertEqual(str(pjs), totals["arquivo_origem"])
 
     def test_mds_collection_reads_multiple_practice_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:
