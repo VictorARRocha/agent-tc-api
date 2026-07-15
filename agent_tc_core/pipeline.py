@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .config import parse_run_context
 from .extractor import ArchiveExtractionError, extract_archive, find_extractor, inventory_archives
-from .mds import MdsIndex
+from .mds import MdsCollection, split_mds_paths
 from .parser import analyze_failure
 from .performance import parse_times_folder
 from .payload import build_shadow_payload
@@ -99,22 +99,24 @@ def read_text_file(path: Path) -> str | None:
 def run_shadow_pipeline(
     *,
     run_folder: str | Path,
-    mds_path: str | Path,
+    mds_path: str | Path | list[str | Path],
     output_root: str | Path,
     vm_name: str | None = None,
     times_folder: str | Path | None = None,
 ) -> tuple[Path, dict[str, object]]:
+    mds_paths = split_mds_paths(mds_path)
     context = parse_run_context(
         run_folder=run_folder,
-        mds_path=mds_path,
+        mds_path=mds_paths[0] if mds_paths else mds_path,
         output_root=output_root,
         vm_name=vm_name,
     )
 
     if not context.run_folder.exists():
         raise FileNotFoundError("Pasta de rodagem nao encontrada: " + str(context.run_folder))
-    if not context.mds_path.exists():
-        raise FileNotFoundError("Unico.mds nao encontrado: " + str(context.mds_path))
+    missing_mds_paths = [path for path in mds_paths if not path.exists()]
+    if missing_mds_paths:
+        raise FileNotFoundError("Arquivo .mds nao encontrado: " + "; ".join(str(path) for path in missing_mds_paths))
 
     extractor = find_extractor()
     archives = inventory_archives(context.run_folder)
@@ -127,7 +129,7 @@ def run_shadow_pipeline(
 
     analysis_dir = context.output_root / f"shadow_analysis_{context.id_rodagem}"
     report_dir = context.output_root / f"shadow_reports_{context.id_rodagem}"
-    mds = MdsIndex(context.mds_path)
+    mds = MdsCollection(mds_paths)
 
     failures = []
     processing_errors = []

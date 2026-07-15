@@ -42,8 +42,9 @@ def _split_moniker(moniker: str) -> tuple[str, str]:
 
 
 class MdsIndex:
-    def __init__(self, mds_path: Path):
+    def __init__(self, mds_path: Path, system: str | None = None):
         self.mds_path = mds_path
+        self.system = system or infer_system_from_mds_path(mds_path)
         self.by_id: dict[str, dict[str, object]] = {}
         self.project_variables: dict[str, str] = {}
         self._load()
@@ -67,8 +68,8 @@ class MdsIndex:
                 is_group = node.attrib.get("group", "").lower() == "true" or has_child_ids
                 script, procedure = _split_moniker(node.attrib.get("testMoniker", ""))
                 self.by_id[node_id] = {
-                    "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"Unico|{node_id}")),
-                    "sistema": "Unico",
+                    "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{self.system}|{node_id}")),
+                    "sistema": self.system,
                     "modulo_codigo": node_id.split(".", 1)[0],
                     "modulo_nome": module["nome"],
                     "node_id": node_id,
@@ -126,11 +127,11 @@ class MdsIndex:
         if not row:
             return CaseInfo(
                 id_caso_teste=case_id,
-                nome_mds="Nao encontrado no Unico.mds",
-                grupo="Nao encontrado no Unico.mds",
+                nome_mds="Nao encontrado no .mds",
+                grupo="Nao encontrado no .mds",
                 descricao="",
                 test_moniker="",
-                caminho_hierarquico="Nao encontrado no Unico.mds",
+                caminho_hierarquico="Nao encontrado no .mds",
                 script_name="",
                 procedure_name="",
             )
@@ -151,3 +152,64 @@ class MdsIndex:
             {key: value for key, value in row.items() if key not in {"description", "testMoniker"}}
             for row in self.by_id.values()
         ]
+
+
+class MdsCollection:
+    def __init__(self, mds_paths: list[Path]):
+        if not mds_paths:
+            raise ValueError("Informe pelo menos um arquivo .mds.")
+        self.system = infer_system_from_mds_paths(mds_paths)
+        self.indexes = [MdsIndex(path, self.system) for path in mds_paths]
+
+    def project_variable_int(self, name: str) -> int | None:
+        values = [
+            value
+            for value in (index.project_variable_int(name) for index in self.indexes)
+            if value is not None
+        ]
+        if not values:
+            return None
+        if len(values) == 1:
+            return values[0]
+        return sum(values)
+
+    def case_info(self, case_id: str) -> CaseInfo:
+        for index in self.indexes:
+            if case_id in index.by_id:
+                return index.case_info(case_id)
+        return self.indexes[0].case_info(case_id)
+
+    def hierarchy_rows(self) -> list[dict[str, object]]:
+        rows = []
+        seen_node_ids: set[str] = set()
+        for index in self.indexes:
+            for row in index.hierarchy_rows():
+                node_id = str(row.get("node_id") or "")
+                if not node_id or node_id in seen_node_ids:
+                    continue
+                rows.append(row)
+                seen_node_ids.add(node_id)
+        return rows
+
+
+def split_mds_paths(value: str | Path | list[str | Path] | tuple[str | Path, ...]) -> list[Path]:
+    if isinstance(value, (list, tuple)):
+        raw_items = []
+        for item in value:
+            raw_items.extend(re.split(r"[;|]", str(item)))
+    else:
+        raw_items = re.split(r"[;|]", str(value))
+    return [Path(item.strip().strip('"')) for item in raw_items if item.strip()]
+
+
+def infer_system_from_mds_paths(paths: list[Path]) -> str:
+    names = " ".join(path.name.lower() for path in paths)
+    if "practice" in names:
+        return "Practice"
+    if "suprema" in names:
+        return "Suprema"
+    return "Unico"
+
+
+def infer_system_from_mds_path(path: Path) -> str:
+    return infer_system_from_mds_paths([path])

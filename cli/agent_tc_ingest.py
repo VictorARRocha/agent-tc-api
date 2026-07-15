@@ -17,7 +17,12 @@ from agent_tc_core.supabase_repository import SupabaseHttpError, SupabaseReposit
 def main() -> int:
     parser = argparse.ArgumentParser(description="Analisa uma rodagem e persiste no backend escolhido.")
     parser.add_argument("--run-folder", required=True, help="Pasta completa da rodagem.")
-    parser.add_argument("--mds", required=True, help="Caminho do Unico.mds.")
+    parser.add_argument(
+        "--mds",
+        required=True,
+        action="append",
+        help="Caminho de um .mds. Pode ser repetido ou conter caminhos separados por ponto e virgula.",
+    )
     parser.add_argument(
         "--output-root",
         default=str(PROJECT_ROOT / "logs_shadow"),

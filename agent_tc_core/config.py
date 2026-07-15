@@ -56,7 +56,7 @@ def parse_run_context(
 
     return RunContext(
         run_folder=folder,
-        mds_path=Path(mds_path),
+        mds_path=Path(str(mds_path).split(";", 1)[0].strip().strip('"')),
         output_root=Path(output_root),
         vm_name=vm,
         versao=version,

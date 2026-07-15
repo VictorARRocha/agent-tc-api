@@ -8,6 +8,7 @@ from agent_tc_core.api_server import AgentTcApi
 from agent_tc_core.config import RunContext, parse_run_context
 from agent_tc_core.payload import failure_id
 from agent_tc_core.pipeline import build_archive_integrity, read_occurrence_totals_from_run_folder
+from agent_tc_core.mds import MdsCollection, split_mds_paths
 from agent_tc_core.sqlite_repository import SQLiteRepository
 from agent_tc_core.supabase_repository import _deduplicate_rows
 
@@ -62,6 +63,32 @@ class PipelineRegressionTests(unittest.TestCase):
         self.assertFalse(integrity["compactacao_completa"])
         self.assertEqual(2, integrity["ocorrencias_sem_compactado"])
         self.assertEqual(0, integrity["compactados_extras"])
+
+    def test_mds_collection_reads_multiple_practice_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir)
+            first = folder / "Practice Base Unificada.mds"
+            second = folder / "Practice Bases Individuais.mds"
+            first.write_text(
+                '<Project><Node name="[19] Practice"><Node name="[19.1] Base"><Node name="[19.1.1] Caso Base" /></Node></Node></Project>',
+                encoding="utf-8",
+            )
+            second.write_text(
+                '<Project><Node name="[19] Practice Individual"><Node name="[19.100] Individuais"><Node name="[19.100.1] Caso Individual" /></Node></Node></Project>',
+                encoding="utf-8",
+            )
+
+            collection = MdsCollection([first, second])
+            rows = collection.hierarchy_rows()
+
+        self.assertEqual("Caso Base", collection.case_info("19.1.1").nome_mds)
+        self.assertEqual("Caso Individual", collection.case_info("19.100.1").nome_mds)
+        self.assertEqual("Practice", {row["sistema"] for row in rows}.pop())
+        self.assertEqual(5, len(rows))
+
+    def test_splits_repeated_and_semicolon_mds_paths(self):
+        paths = split_mds_paths(["a.mds;b.mds", "c.mds"])
+        self.assertEqual(["a.mds", "b.mds", "c.mds"], [str(path) for path in paths])
 
     def test_sqlite_imports_repeated_case_and_exact_difference_links(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
