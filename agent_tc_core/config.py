@@ -36,7 +36,7 @@ def infer_version_from_mds_path(mds_path: str | Path) -> str:
     raw = str(mds_path).lower()
     if "practice" in raw:
         return "PRACTICE"
-    if "suprema" in raw:
+    if "suprema" in raw or "integracoes" in raw or "integrações" in raw:
         return "SUPREMA"
     return "SEM_VERSAO"
 

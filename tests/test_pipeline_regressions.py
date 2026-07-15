@@ -64,6 +64,17 @@ class PipelineRegressionTests(unittest.TestCase):
         self.assertEqual("8.30a", context.versao)
         self.assertEqual("rod_a04_8.30a_20260701_123100", context.id_rodagem)
 
+    def test_suprema_run_folder_can_be_date_only(self):
+        context = parse_run_context(
+            run_folder=r"S:\Teste automatico\Arquivos\Arquivos De Log\ArquivosCompactados\A03\15_07_2026 14_30_00",
+            mds_path=r"C:\TC\tc12\PROJETO-TC12\Integracoes\Integracoes.mds",
+            output_root=r"S:\Teste automatico\Arquivos\AgenteTC\logs",
+            vm_name="a03",
+        )
+
+        self.assertEqual("SUPREMA", context.versao)
+        self.assertEqual("rod_a03_SUPREMA_20260715_143000", context.id_rodagem)
+
     def test_failure_id_uses_archive_identity(self):
         context = RunContext(
             run_folder=Path("."),
@@ -154,6 +165,21 @@ class PipelineRegressionTests(unittest.TestCase):
         self.assertEqual("Caso Individual", collection.case_info("19.100.1").nome_mds)
         self.assertEqual("Practice", {row["sistema"] for row in rows}.pop())
         self.assertEqual(5, len(rows))
+
+    def test_integracoes_mds_is_suprema(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mds = Path(temp_dir) / "Integracoes.mds"
+            mds.write_text(
+                '<Project><Node name="[16] Suprema"><Node name="[16.1] Importacoes"><Node name="[16.1.1] Caso Suprema" /></Node></Node></Project>',
+                encoding="utf-8",
+            )
+
+            collection = MdsCollection([mds])
+            rows = collection.hierarchy_rows()
+
+        self.assertEqual("Suprema", collection.system)
+        self.assertEqual("Suprema", {row["sistema"] for row in rows}.pop())
+        self.assertEqual("Caso Suprema", collection.case_info("16.1.1").nome_mds)
 
     def test_mds_reads_practice_items_with_marker_before_id(self):
         with tempfile.TemporaryDirectory() as temp_dir:

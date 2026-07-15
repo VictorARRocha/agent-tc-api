@@ -206,7 +206,7 @@ def infer_system_from_mds_paths(paths: list[Path]) -> str:
     names = " ".join(path.name.lower() for path in paths)
     if "practice" in names:
         return "Practice"
-    if "suprema" in names:
+    if "suprema" in names or "integracoes" in names or "integrações" in names:
         return "Suprema"
     return "Unico"
 
