@@ -24,11 +24,23 @@ class RunContext:
 RUN_NAME_RE = re.compile(
     r"^(?P<version>.+?)\s+(?P<date>\d{2}_\d{2}_\d{4})\s+(?P<time>\d{2}_\d{2}_\d{2})$"
 )
+DATE_ONLY_RUN_NAME_RE = re.compile(
+    r"^(?P<date>\d{2}_\d{2}_\d{4})\s+(?P<time>\d{2}_\d{2}_\d{2})$"
+)
 
 
 def infer_vm_from_path(run_folder: Path) -> str:
     parent = run_folder.parent.name
     return parent or "VM_DESCONHECIDA"
+
+
+def infer_version_from_mds_path(mds_path: str | Path) -> str:
+    raw = str(mds_path).lower()
+    if "practice" in raw:
+        return "PRACTICE"
+    if "suprema" in raw:
+        return "SUPREMA"
+    return "SEM_VERSAO"
 
 
 def parse_run_context(
@@ -40,12 +52,16 @@ def parse_run_context(
 ) -> RunContext:
     folder = Path(run_folder)
     match = RUN_NAME_RE.match(folder.name)
+    if match:
+        version = match.group("version").strip()
+    else:
+        match = DATE_ONLY_RUN_NAME_RE.match(folder.name)
+        version = infer_version_from_mds_path(mds_path) if match else ""
     if not match:
         raise ValueError(
-            "Nome da pasta deve seguir 'VERSAO dd_MM_yyyy HH_mm_ss': " + folder.name
+            "Nome da pasta deve seguir 'VERSAO dd_MM_yyyy HH_mm_ss' ou 'dd_MM_yyyy HH_mm_ss': " + folder.name
         )
 
-    version = match.group("version").strip()
     parsed = datetime.strptime(
         match.group("date") + " " + match.group("time"), "%d_%m_%Y %H_%M_%S"
     )
