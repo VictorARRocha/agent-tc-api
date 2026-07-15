@@ -22,11 +22,9 @@ class RunContext:
 
 
 RUN_NAME_RE = re.compile(
-    r"^(?P<version>.+?)\s+(?P<date>\d{2}_\d{2}_\d{4})\s+(?P<time>\d{2}_\d{2}_\d{2})$"
+    r"^(?:(?P<prefix>.*?)\s+)?(?P<date>\d{2}_\d{2}_\d{4})[\s_]+(?P<time>\d{2}_\d{2}_\d{2})$"
 )
-DATE_ONLY_RUN_NAME_RE = re.compile(
-    r"^(?P<date>\d{2}_\d{2}_\d{4})\s+(?P<time>\d{2}_\d{2}_\d{2})$"
-)
+LEGACY_VERSION_RE = re.compile(r"\b\d+(?:\.\d+)+[A-Za-z]?\b")
 
 
 def infer_vm_from_path(run_folder: Path) -> str:
@@ -43,6 +41,21 @@ def infer_version_from_mds_path(mds_path: str | Path) -> str:
     return "SEM_VERSAO"
 
 
+def is_practice_context(mds_path: str | Path) -> bool:
+    return "practice" in str(mds_path).lower()
+
+
+def normalize_run_version(raw_version: str, mds_path: str | Path) -> str:
+    version = raw_version.strip()
+    if not version:
+        return infer_version_from_mds_path(mds_path)
+    if is_practice_context(mds_path):
+        matches = LEGACY_VERSION_RE.findall(version)
+        if matches:
+            return matches[-1]
+    return version
+
+
 def parse_run_context(
     *,
     run_folder: str | Path,
@@ -52,15 +65,11 @@ def parse_run_context(
 ) -> RunContext:
     folder = Path(run_folder)
     match = RUN_NAME_RE.match(folder.name)
-    if match:
-        version = match.group("version").strip()
-    else:
-        match = DATE_ONLY_RUN_NAME_RE.match(folder.name)
-        version = infer_version_from_mds_path(mds_path) if match else ""
     if not match:
         raise ValueError(
             "Nome da pasta deve seguir 'VERSAO dd_MM_yyyy HH_mm_ss' ou 'dd_MM_yyyy HH_mm_ss': " + folder.name
         )
+    version = normalize_run_version(match.group("prefix") or "", mds_path)
 
     parsed = datetime.strptime(
         match.group("date") + " " + match.group("time"), "%d_%m_%Y %H_%M_%S"

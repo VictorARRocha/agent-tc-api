@@ -44,6 +44,23 @@ class PipelineRegressionTests(unittest.TestCase):
         self.assertEqual("20260707_185532", context.stamp)
         self.assertEqual("rod_a04_PRACTICE_20260707_185532", context.id_rodagem)
 
+    def test_practice_run_folder_uses_legacy_version_token(self):
+        context = parse_run_context(
+            run_folder=(
+                r"S:\Teste automatico\Arquivos\Arquivos De Log\ArquivosCompactados\A04"
+                r"\Practice Base Agrupada 8.30a 01_07_2026 12_31_00"
+            ),
+            mds_path=(
+                r"C:\TC\TC12 - Simplificado\Cadastros\Practice Base Unificada.mds;"
+                r"C:\TC\TC12 - Simplificado\Practice Antigo\Practice Bases Individuais.mds"
+            ),
+            output_root=r"S:\Teste automatico\Arquivos\AgenteTC\logs",
+            vm_name="a04",
+        )
+
+        self.assertEqual("8.30a", context.versao)
+        self.assertEqual("rod_a04_8.30a_20260701_123100", context.id_rodagem)
+
     def test_failure_id_uses_archive_identity(self):
         context = RunContext(
             run_folder=Path("."),
