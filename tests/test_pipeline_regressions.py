@@ -18,7 +18,7 @@ from agent_tc_core.pipeline import (
 )
 from agent_tc_core.project_suite import ProjectSuiteVariables
 from agent_tc_core.sqlite_repository import SQLiteRepository
-from agent_tc_core.supabase_repository import _deduplicate_rows
+from agent_tc_core.supabase_repository import SupabaseRepository, _deduplicate_rows
 
 
 class PipelineRegressionTests(unittest.TestCase):
@@ -31,6 +31,63 @@ class PipelineRegressionTests(unittest.TestCase):
         )
         self.assertEqual("a08", context.vm_name)
         self.assertTrue(context.id_rodagem.startswith("rod_a08_"))
+
+    def test_supabase_hierarchy_fetches_all_pages(self):
+        class FakeSupabaseRepository(SupabaseRepository):
+            def __init__(self, rows):
+                self.rows = rows
+                self.offsets = []
+
+            def _module_by_slug(self, slug):
+                return {"id": "mod_fiscal"} if slug == "fiscal" else None
+
+            def _select(self, table, params=None):
+                assert table == "testcase_hierarchy"
+                params = params or {}
+                self.offsets.append(int(params.get("offset") or 0))
+                offset = int(params.get("offset") or 0)
+                limit = int(params.get("limit") or 1000)
+                module_filter = params.get("module_id")
+                rows = [
+                    row
+                    for row in self.rows
+                    if not module_filter or module_filter == "eq." + row["module_id"]
+                ]
+                return rows[offset : offset + limit]
+
+        def hierarchy_row(node_id: str) -> dict[str, object]:
+            return {
+                "id": "hier_" + node_id.replace(".", "_"),
+                "system": "Unico",
+                "module_id": "mod_fiscal",
+                "module_code": "2",
+                "module_name": "Fiscal",
+                "node_id": node_id,
+                "parent_node_id": "2",
+                "node_name": "Grupo " + node_id,
+                "node_type": "group",
+                "full_path_ids_json": ["2", node_id],
+                "full_path_names_json": ["Fiscal", "Grupo " + node_id],
+                "full_path_label": f"[2] Fiscal > [{node_id}] Grupo {node_id}",
+                "script_name": "",
+                "procedure_name": "",
+                "mds_path": r"C:\TC\Unico\Unico.mds",
+                "created_at": "2026-07-22T00:00:00+00:00",
+                "updated_at": "2026-07-22T00:00:00+00:00",
+            }
+
+        rows = [hierarchy_row(f"2.{index}") for index in range(10, 1010)]
+        rows.extend([hierarchy_row("2.7"), hierarchy_row("2.9")])
+        repo = FakeSupabaseRepository(rows)
+
+        result = repo.testcase_hierarchy("fiscal")
+        node_ids = [row["node_id"] for row in result]
+
+        self.assertEqual(len(rows), len(result))
+        self.assertIn("2.7", node_ids)
+        self.assertIn("2.9", node_ids)
+        self.assertLess(node_ids.index("2.7"), node_ids.index("2.10"))
+        self.assertEqual([0, 1000], repo.offsets)
 
     def test_practice_run_folder_can_be_date_only(self):
         context = parse_run_context(

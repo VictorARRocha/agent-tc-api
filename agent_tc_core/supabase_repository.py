@@ -443,7 +443,8 @@ class SupabaseRepository:
             if not module:
                 return []
             params["module_id"] = "eq." + module["id"]
-        rows = self._select("testcase_hierarchy", params)
+        rows = self._select_all("testcase_hierarchy", params)
+        rows.sort(key=lambda row: (str(row.get("module_code") or ""), _node_sort_key(str(row.get("node_id") or ""))))
         return [hierarchy_api_row(row) for row in rows]
 
     def payload(self, run_id: str) -> dict[str, Any] | None:
@@ -855,6 +856,24 @@ class SupabaseRepository:
     def _select(self, table: str, params: dict[str, str] | None = None) -> list[dict[str, Any]]:
         return self._rest_json("GET", "/" + self._table(table), query=params or {})
 
+    def _select_all(
+        self,
+        table: str,
+        params: dict[str, str] | None = None,
+        *,
+        page_size: int = 1000,
+    ) -> list[dict[str, Any]]:
+        all_rows: list[dict[str, Any]] = []
+        offset = 0
+        base_params = dict(params or {})
+        while True:
+            page_params = {**base_params, "limit": str(page_size), "offset": str(offset)}
+            rows = self._select(table, page_params)
+            all_rows.extend(rows)
+            if len(rows) < page_size:
+                return all_rows
+            offset += page_size
+
     def _delete(self, table: str, params: dict[str, str]) -> None:
         if self.dry_run:
             return
@@ -1021,6 +1040,16 @@ def _ai_response_debug(response: Any) -> dict[str, Any]:
     if isinstance(validated, dict):
         out["validated_clusters"] = len(validated.get("clusters") or [])
     return out
+
+
+def _node_sort_key(node_id: str) -> tuple[int, ...]:
+    parts = []
+    for item in node_id.split("."):
+        try:
+            parts.append(int(item))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts)
 
 
 def _rerun_request_is_terminal(row: dict[str, Any]) -> bool:
