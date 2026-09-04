@@ -9,6 +9,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from agent_tc_core.postgres_repository import PostgresRepository
 from agent_tc_core.sqlite_repository import SQLiteRepository
 from agent_tc_core.supabase_repository import SupabaseHttpError, SupabaseRepository
 
@@ -23,18 +24,29 @@ def main() -> int:
     parser.add_argument("--env", default=str(DEFAULT_ENV), help="Arquivo .env para Supabase.")
     parser.add_argument("--supabase-schema", default="public", help="Schema usado no Supabase.")
     parser.add_argument("--supabase-table-prefix", default="agent_tc_", help="Prefixo das tabelas no Supabase.")
+    parser.add_argument("--postgres-dsn", help="DSN PostgreSQL usado quando --backend postgres.")
+    parser.add_argument("--postgres-schema", default="public", help="Schema usado quando --backend postgres.")
+    parser.add_argument("--postgres-table-prefix", default="agent_tc_", help="Prefixo das tabelas quando --backend postgres.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("init-sqlite", help="Cria/atualiza o banco SQLite local.")
-    sub.add_parser("init-supabase", help="Valida Supabase, cria bucket e semeia modulos.")
+    init_supabase = sub.add_parser("init-supabase", help="Valida Supabase, cria bucket e semeia modulos.")
+    add_supabase_args(init_supabase)
+    init_postgres = sub.add_parser("init-postgres", help="Cria/atualiza o banco PostgreSQL local e semeia modulos.")
+    add_postgres_args(init_postgres)
 
     import_parser = sub.add_parser("import-payload", help="Importa shadow_payload.json.")
     import_parser.add_argument("--payload", required=True)
-    import_parser.add_argument("--backend", choices=["sqlite", "supabase"], default="sqlite")
+    import_parser.add_argument("--backend", choices=["sqlite", "supabase", "postgres"], default="sqlite")
     import_parser.add_argument("--dry-run", action="store_true", help="Planeja sem escrever no Supabase.")
+    add_postgres_args(import_parser)
+    add_supabase_args(import_parser, include_env=False)
 
     sub.add_parser("summary", help="Mostra contagens principais.")
-    sub.add_parser("summary-supabase", help="Mostra contagens principais no Supabase.")
+    summary_supabase = sub.add_parser("summary-supabase", help="Mostra contagens principais no Supabase.")
+    add_supabase_args(summary_supabase)
+    summary_postgres = sub.add_parser("summary-postgres", help="Mostra contagens principais no PostgreSQL local.")
+    add_postgres_args(summary_postgres)
 
     args = parser.parse_args()
 
@@ -54,12 +66,31 @@ def main() -> int:
         print(json.dumps({"ok": True, "backend": "supabase", "schema": args.supabase_schema}, ensure_ascii=False, indent=2))
         return 0
 
+    if args.command == "init-postgres":
+        repo = PostgresRepository(
+            env_path=args.env,
+            dsn=args.postgres_dsn,
+            schema=args.postgres_schema,
+            table_prefix=args.postgres_table_prefix,
+        )
+        repo.initialize()
+        print(json.dumps({"ok": True, "backend": "postgres", "schema": args.postgres_schema}, ensure_ascii=False, indent=2))
+        return 0
+
     if args.command == "import-payload":
         if args.backend == "supabase":
             repo = SupabaseRepository(
                 env_path=args.env,
                 schema=args.supabase_schema,
                 table_prefix=args.supabase_table_prefix,
+                dry_run=args.dry_run,
+            )
+        elif args.backend == "postgres":
+            repo = PostgresRepository(
+                env_path=args.env,
+                dsn=args.postgres_dsn,
+                schema=args.postgres_schema,
+                table_prefix=args.postgres_table_prefix,
                 dry_run=args.dry_run,
             )
         else:
@@ -78,6 +109,31 @@ def main() -> int:
             "testcase_hierarchy": len(repo.testcase_hierarchy()),
         }
         runs = repo.runs()
+        if runs:
+            latest = runs[0]
+            summary["latest_run"] = latest["id"]
+            summary["latest_run_occurrences"] = len(repo.failures(latest["id"]))
+            summary["latest_run_evidence_files"] = len(repo.evidences(latest["id"]))
+            summary["latest_run_ai_groups"] = len(repo.groups(latest["id"]))
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "summary-postgres":
+        repo = PostgresRepository(
+            env_path=args.env,
+            dsn=args.postgres_dsn,
+            schema=args.postgres_schema,
+            table_prefix=args.postgres_table_prefix,
+        )
+        runs = repo.runs()
+        summary = {
+            "backend": "postgres",
+            "schema": args.postgres_schema,
+            "table_prefix": args.postgres_table_prefix,
+            "modules": len(repo.modules()),
+            "runs": len(runs),
+            "testcase_hierarchy": len(repo.testcase_hierarchy()),
+        }
         if runs:
             latest = runs[0]
             summary["latest_run"] = latest["id"]
@@ -113,6 +169,20 @@ def main() -> int:
 
     parser.error("Comando invalido")
     return 2
+
+
+def add_postgres_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--env", default=str(DEFAULT_ENV), help="Arquivo .env para Postgres.")
+    parser.add_argument("--postgres-dsn", help="DSN PostgreSQL usado quando --backend postgres.")
+    parser.add_argument("--postgres-schema", default="public", help="Schema usado quando --backend postgres.")
+    parser.add_argument("--postgres-table-prefix", default="agent_tc_", help="Prefixo das tabelas quando --backend postgres.")
+
+
+def add_supabase_args(parser: argparse.ArgumentParser, *, include_env: bool = True) -> None:
+    if include_env:
+        parser.add_argument("--env", default=str(DEFAULT_ENV), help="Arquivo .env para Supabase.")
+    parser.add_argument("--supabase-schema", default="public", help="Schema usado no Supabase.")
+    parser.add_argument("--supabase-table-prefix", default="agent_tc_", help="Prefixo das tabelas no Supabase.")
 
 
 if __name__ == "__main__":

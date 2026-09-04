@@ -1,3 +1,5 @@
+CREATE SCHEMA IF NOT EXISTS public;
+
 CREATE TABLE IF NOT EXISTS public.agent_tc_schema_migrations (
   version TEXT PRIMARY KEY,
   applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -244,88 +246,3 @@ CREATE TABLE IF NOT EXISTS public.agent_tc_rerun_requests (
 
 CREATE INDEX IF NOT EXISTS idx_agent_tc_rerun_requests_status ON public.agent_tc_rerun_requests(status);
 CREATE INDEX IF NOT EXISTS idx_agent_tc_rerun_requests_created ON public.agent_tc_rerun_requests(created_at DESC);
-
-GRANT SELECT ON TABLE public.agent_tc_schema_migrations TO anon, authenticated;
-GRANT SELECT ON TABLE public.agent_tc_modules TO anon, authenticated;
-GRANT SELECT ON TABLE public.agent_tc_runs TO anon, authenticated;
-GRANT SELECT ON TABLE public.agent_tc_ingestion_batches TO anon, authenticated;
-GRANT SELECT ON TABLE public.agent_tc_testcase_hierarchy TO anon, authenticated;
-GRANT SELECT ON TABLE public.agent_tc_occurrences TO anon, authenticated;
-GRANT SELECT ON TABLE public.agent_tc_evidence_files TO anon, authenticated;
-GRANT SELECT ON TABLE public.agent_tc_report_differences TO anon, authenticated;
-GRANT SELECT ON TABLE public.agent_tc_ai_analysis_jobs TO anon, authenticated;
-GRANT SELECT ON TABLE public.agent_tc_ai_groups TO anon, authenticated;
-GRANT SELECT ON TABLE public.agent_tc_ai_group_occurrences TO anon, authenticated;
-GRANT SELECT ON TABLE public.agent_tc_recommended_actions TO anon, authenticated;
-GRANT SELECT ON TABLE public.agent_tc_run_delays TO anon, authenticated;
-GRANT SELECT ON TABLE public.agent_tc_rerun_requests TO anon, authenticated;
-
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_tc_schema_migrations TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_tc_modules TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_tc_runs TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_tc_ingestion_batches TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_tc_testcase_hierarchy TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_tc_occurrences TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_tc_evidence_files TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_tc_report_differences TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_tc_ai_analysis_jobs TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_tc_ai_groups TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_tc_ai_group_occurrences TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_tc_recommended_actions TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_tc_run_delays TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_tc_rerun_requests TO service_role;
-
-DO $$
-DECLARE
-  table_name TEXT;
-  table_names TEXT[] := ARRAY[
-    'agent_tc_schema_migrations',
-    'agent_tc_modules',
-    'agent_tc_runs',
-    'agent_tc_ingestion_batches',
-    'agent_tc_testcase_hierarchy',
-    'agent_tc_occurrences',
-    'agent_tc_evidence_files',
-    'agent_tc_report_differences',
-    'agent_tc_ai_analysis_jobs',
-    'agent_tc_ai_groups',
-    'agent_tc_ai_group_occurrences',
-    'agent_tc_recommended_actions',
-    'agent_tc_run_delays',
-    'agent_tc_rerun_requests'
-  ];
-BEGIN
-  FOREACH table_name IN ARRAY table_names LOOP
-    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', table_name);
-
-    IF NOT EXISTS (
-      SELECT 1
-      FROM pg_policies
-      WHERE schemaname = 'public'
-        AND tablename = table_name
-        AND policyname = 'agent_tc_read'
-    ) THEN
-      EXECUTE format(
-        'CREATE POLICY agent_tc_read ON public.%I FOR SELECT TO anon, authenticated USING (true)',
-        table_name
-      );
-    END IF;
-
-    IF NOT EXISTS (
-      SELECT 1
-      FROM pg_policies
-      WHERE schemaname = 'public'
-        AND tablename = table_name
-        AND policyname = 'agent_tc_service_write'
-    ) THEN
-      EXECUTE format(
-        'CREATE POLICY agent_tc_service_write ON public.%I FOR ALL TO service_role USING (true) WITH CHECK (true)',
-        table_name
-      );
-    END IF;
-  END LOOP;
-END $$;
-
-INSERT INTO public.agent_tc_schema_migrations(version, applied_at)
-VALUES ('001_initial', now())
-ON CONFLICT (version) DO NOTHING;

@@ -4,7 +4,7 @@ import hashlib
 import json
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -202,6 +202,114 @@ class SQLiteRepository:
             "ai_groups": len(payload.get("agrupamentos_shadow") or payload.get("agrupamentos") or []),
             "verification": verification,
         }
+
+    def purge_inactive_versions(
+        self,
+        *,
+        retention_days: int = 30,
+        dry_run: bool = True,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        self.initialize()
+        now = now or datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=retention_days)
+        cutoff_iso = cutoff.isoformat(timespec="seconds")
+        result: dict[str, Any] = {
+            "backend": "sqlite",
+            "db_path": str(self.db_path),
+            "retention_days": retention_days,
+            "cutoff": cutoff_iso,
+            "dry_run": dry_run,
+            "versions": [],
+            "totals": {
+                "versions": 0,
+                "runs": 0,
+                "evidence_files": 0,
+                "storage_paths": 0,
+                "storage_deleted": 0,
+            },
+            "storage": {
+                "provider": "database_only",
+                "message": "SQLite limpa as tabelas. Arquivos locais/buckets devem ser tratados por um adapter de storage dedicado.",
+            },
+        }
+        with self.connect() as conn:
+            groups = conn.execute(
+                """
+                SELECT system, version, MAX(started_at) AS latest_started_at, COUNT(*) AS runs_count
+                FROM runs
+                WHERE COALESCE(version, '') <> ''
+                GROUP BY system, version
+                HAVING latest_started_at < ?
+                ORDER BY latest_started_at ASC, system ASC, version ASC
+                """,
+                (cutoff_iso,),
+            ).fetchall()
+            for group in groups:
+                run_rows = conn.execute(
+                    """
+                    SELECT id
+                    FROM runs
+                    WHERE system = ? AND version = ?
+                    ORDER BY started_at ASC
+                    """,
+                    (group["system"], group["version"]),
+                ).fetchall()
+                run_ids = [row["id"] for row in run_rows]
+                evidence_rows = []
+                if run_ids:
+                    evidence_rows = conn.execute(
+                        "SELECT storage_path FROM evidence_files WHERE run_id IN (" + placeholders(run_ids) + ")",
+                        run_ids,
+                    ).fetchall()
+                storage_paths = sorted({row["storage_path"] for row in evidence_rows if row["storage_path"]})
+                item = {
+                    "system": group["system"],
+                    "version": group["version"],
+                    "latest_started_at": group["latest_started_at"],
+                    "runs": len(run_ids),
+                    "evidence_files": len(evidence_rows),
+                    "storage_paths": len(storage_paths),
+                    "run_ids": run_ids,
+                }
+                result["versions"].append(item)
+                result["totals"]["versions"] += 1
+                result["totals"]["runs"] += len(run_ids)
+                result["totals"]["evidence_files"] += len(evidence_rows)
+                result["totals"]["storage_paths"] += len(storage_paths)
+
+            if dry_run or not result["versions"]:
+                return result
+
+            for item in result["versions"]:
+                run_ids = item["run_ids"]
+                if not run_ids:
+                    continue
+                marks = placeholders(run_ids)
+                conn.execute("UPDATE rerun_requests SET source_run_id = NULL WHERE source_run_id IN (" + marks + ")", run_ids)
+                conn.execute("DELETE FROM report_differences WHERE run_id IN (" + marks + ")", run_ids)
+                conn.execute("DELETE FROM recommended_actions WHERE run_id IN (" + marks + ")", run_ids)
+                group_ids = [
+                    row["id"]
+                    for row in conn.execute(
+                        "SELECT id FROM ai_groups WHERE run_id IN (" + marks + ")",
+                        run_ids,
+                    ).fetchall()
+                ]
+                if group_ids:
+                    conn.execute(
+                        "DELETE FROM ai_group_occurrences WHERE group_id IN (" + placeholders(group_ids) + ")",
+                        group_ids,
+                    )
+                conn.execute("DELETE FROM ai_groups WHERE run_id IN (" + marks + ")", run_ids)
+                conn.execute("DELETE FROM ai_analysis_jobs WHERE run_id IN (" + marks + ")", run_ids)
+                conn.execute("DELETE FROM run_delays WHERE run_id IN (" + marks + ")", run_ids)
+                conn.execute("DELETE FROM evidence_files WHERE run_id IN (" + marks + ")", run_ids)
+                conn.execute("DELETE FROM ingestion_batches WHERE run_id IN (" + marks + ")", run_ids)
+                conn.execute("DELETE FROM occurrences WHERE run_id IN (" + marks + ")", run_ids)
+                conn.execute("DELETE FROM runs WHERE id IN (" + marks + ")", run_ids)
+            conn.commit()
+        return result
 
     def modules(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -764,6 +872,10 @@ def upsert(conn: sqlite3.Connection, table: str, row: dict[str, Any], pk: str) -
         f"ON CONFLICT({pk}) DO UPDATE SET {updates}"
     )
     conn.execute(sql, [row[column] for column in columns])
+
+
+def placeholders(values: list[Any]) -> str:
+    return ", ".join(["?"] * len(values))
 
 
 def now_iso() -> str:

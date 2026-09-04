@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .api_repository import OFFICIAL_MODULES, SLUG_BY_MODULE_ID
@@ -35,14 +35,13 @@ from .sqlite_repository import (
     sha256_file,
     translate_node_type,
 )
+from .storage import DEFAULT_BUCKET, storage_from_env
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ENV = ROOT / ".env"
 DEFAULT_SCHEMA = "public"
 DEFAULT_TABLE_PREFIX = "agent_tc_"
-DEFAULT_BUCKET = "agent-tc-evidences"
-SIGNED_URL_SECONDS = 60 * 60 * 24 * 7
 
 
 class SupabaseHttpError(RuntimeError):
@@ -74,11 +73,21 @@ class SupabaseRepository:
         self.table_prefix = table_prefix if table_prefix is not None else env.get("SUPABASE_TABLE_PREFIX", DEFAULT_TABLE_PREFIX)
         self.storage_public = parse_bool(env.get("SUPABASE_BUCKET_PUBLIC"), default=True)
         self.dry_run = dry_run
+        self.storage = storage_from_env(
+            env,
+            supabase_url=self.url,
+            supabase_service_key=self.service_key,
+            default_bucket=self.bucket,
+            storage_public=self.storage_public,
+            dry_run=dry_run,
+        )
+        self.bucket = self.storage.bucket
         self.plan: dict[str, Any] = {
             "dry_run": dry_run,
             "schema": self.schema,
             "table_prefix": self.table_prefix,
             "bucket": self.bucket,
+            "storage_provider": self.storage.provider,
             "upserts": {},
             "uploads": 0,
             "skipped_evidence": 0,
@@ -94,7 +103,7 @@ class SupabaseRepository:
         if self.dry_run:
             self.plan["initialize"] = "skipped_dry_run"
             return
-        self.ensure_bucket()
+        self.storage.initialize()
         self.seed_modules()
 
     def seed_modules(self) -> None:
@@ -132,7 +141,7 @@ class SupabaseRepository:
         batch_id = "ing_" + uuid.uuid5(uuid.NAMESPACE_URL, f"{run_id}|{payload_sha}").hex
 
         if not self.dry_run:
-            self.ensure_bucket()
+            self.storage.initialize()
         self.seed_modules()
 
         run_row = {
@@ -236,13 +245,115 @@ class SupabaseRepository:
             "verification": verification,
         }
 
+    def purge_inactive_versions(
+        self,
+        *,
+        retention_days: int = 30,
+        dry_run: bool = True,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        now = now or datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=retention_days)
+        cutoff_iso = cutoff.isoformat(timespec="seconds")
+        result: dict[str, Any] = {
+            "backend": "supabase",
+            "schema": self.schema,
+            "table_prefix": self.table_prefix,
+            "bucket": self.bucket,
+            "retention_days": retention_days,
+            "cutoff": cutoff_iso,
+            "dry_run": dry_run,
+            "versions": [],
+            "totals": {
+                "versions": 0,
+                "runs": 0,
+                "evidence_files": 0,
+                "storage_paths": 0,
+                "storage_deleted": 0,
+            },
+            "storage_errors": [],
+        }
+        run_rows = self._select_all(
+            "runs",
+            {"select": "id,system,version,started_at", "order": "started_at.asc"},
+        )
+        by_version: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for row in run_rows:
+            version = str(row.get("version") or "").strip()
+            started_at = str(row.get("started_at") or "").strip()
+            if not version or not started_at:
+                continue
+            by_version.setdefault((str(row.get("system") or ""), version), []).append(row)
+
+        for (system, version), rows in sorted(by_version.items(), key=lambda item: max(str(row.get("started_at") or "") for row in item[1])):
+            latest_started_at = max(str(row.get("started_at") or "") for row in rows)
+            if latest_started_at >= cutoff_iso:
+                continue
+            run_ids = [str(row["id"]) for row in rows if row.get("id")]
+            evidence_rows = self._select_where_in(
+                "evidence_files",
+                "run_id",
+                run_ids,
+                {"select": "id,storage_path"},
+            )
+            storage_paths = sorted({str(row.get("storage_path") or "") for row in evidence_rows if row.get("storage_path")})
+            item = {
+                "system": system,
+                "version": version,
+                "latest_started_at": latest_started_at,
+                "runs": len(run_ids),
+                "evidence_files": len(evidence_rows),
+                "storage_paths": len(storage_paths),
+                "run_ids": run_ids,
+            }
+            result["versions"].append(item)
+            result["totals"]["versions"] += 1
+            result["totals"]["runs"] += len(run_ids)
+            result["totals"]["evidence_files"] += len(evidence_rows)
+            result["totals"]["storage_paths"] += len(storage_paths)
+
+        if dry_run or not result["versions"]:
+            return result
+
+        for item in result["versions"]:
+            run_ids = item["run_ids"]
+            evidence_rows = self._select_where_in(
+                "evidence_files",
+                "run_id",
+                run_ids,
+                {"select": "storage_path"},
+            )
+            storage_paths = sorted({str(row.get("storage_path") or "") for row in evidence_rows if row.get("storage_path")})
+            deleted = self.storage.delete_paths(storage_paths)
+            result["totals"]["storage_deleted"] += deleted["deleted"]
+            result["storage_errors"].extend(deleted["errors"])
+            if deleted["errors"]:
+                raise RuntimeError(
+                    "Falha ao limpar bucket antes de apagar banco: "
+                    + json.dumps(deleted["errors"], ensure_ascii=False)[:2000]
+                )
+            self._patch_with_in("rerun_requests", "source_run_id", run_ids, {"source_run_id": None})
+            self._delete_with_in("report_differences", "run_id", run_ids)
+            self._delete_with_in("recommended_actions", "run_id", run_ids)
+            group_rows = self._select_where_in("ai_groups", "run_id", run_ids, {"select": "id"})
+            group_ids = [str(row["id"]) for row in group_rows if row.get("id")]
+            self._delete_with_in("ai_group_occurrences", "group_id", group_ids)
+            self._delete_with_in("ai_groups", "run_id", run_ids)
+            self._delete_with_in("ai_analysis_jobs", "run_id", run_ids)
+            self._delete_with_in("run_delays", "run_id", run_ids)
+            self._delete_with_in("evidence_files", "run_id", run_ids)
+            self._delete_with_in("ingestion_batches", "run_id", run_ids)
+            self._delete_with_in("occurrences", "run_id", run_ids)
+            self._delete_with_in("runs", "id", run_ids)
+        return result
+
     def _verify_run_import(self, run_id: str, expected: dict[str, int]) -> dict[str, Any]:
         if self.dry_run:
             return {"ok": True, "dry_run": True, "expected": expected, "actual": expected}
         actual = {
-            "occurrences": len(self._select("occurrences", {"run_id": "eq." + run_id, "select": "id"})),
-            "evidence_files": len(self._select("evidence_files", {"run_id": "eq." + run_id, "select": "id"})),
-            "report_differences": len(self._select("report_differences", {"run_id": "eq." + run_id, "select": "id"})),
+            "occurrences": len(self._select_all("occurrences", {"run_id": "eq." + run_id, "select": "id"})),
+            "evidence_files": len(self._select_all("evidence_files", {"run_id": "eq." + run_id, "select": "id"})),
+            "report_differences": len(self._select_all("report_differences", {"run_id": "eq." + run_id, "select": "id"})),
             "ai_groups": len(
                 self._select(
                     "ai_groups",
@@ -273,7 +384,7 @@ class SupabaseRepository:
             if not module:
                 return []
             params["module_id"] = "eq." + module["id"]
-        rows = self._select("runs", params)
+        rows = self._select_all("runs", params)
         return [run_api_row(self._with_module(row)) for row in rows]
 
     def run(self, run_id: str) -> dict[str, Any] | None:
@@ -289,7 +400,7 @@ class SupabaseRepository:
             for group_id, occurrence_ids in links.items()
             for occurrence_id in occurrence_ids
         }
-        rows = self._select("occurrences", {"run_id": "eq." + run_id, "order": "testcase_node_id.asc"})
+        rows = self._select_all("occurrences", {"run_id": "eq." + run_id, "order": "testcase_node_id.asc"})
         out = []
         for row in rows:
             row = dict(row)
@@ -298,15 +409,15 @@ class SupabaseRepository:
         return out
 
     def evidences(self, run_id: str) -> list[dict[str, Any]]:
-        rows = self._select("evidence_files", {"run_id": "eq." + run_id, "order": "occurrence_id.asc,file_role.asc,original_name.asc"})
+        rows = self._select_all("evidence_files", {"run_id": "eq." + run_id, "order": "occurrence_id.asc,file_role.asc,original_name.asc"})
         return [evidence_api_row(row) for row in rows]
 
     def evidences_by_failure(self, failure_id: str) -> list[dict[str, Any]]:
-        rows = self._select("evidence_files", {"occurrence_id": "eq." + failure_id, "order": "file_role.asc,original_name.asc"})
+        rows = self._select_all("evidence_files", {"occurrence_id": "eq." + failure_id, "order": "file_role.asc,original_name.asc"})
         return [evidence_api_row(row) for row in rows]
 
     def report_differences(self, run_id: str) -> list[dict[str, Any]]:
-        return self._select(
+        return self._select_all(
             "report_differences",
             {"run_id": "eq." + run_id, "order": "testcase_node_id.asc,base_file_name.asc"},
         )
@@ -316,7 +427,7 @@ class SupabaseRepository:
             "ai_analysis_jobs",
             {"run_id": "eq." + run_id, "order": "created_at.desc", "limit": "1"},
         )
-        real_groups = self._select(
+        real_groups = self._select_all(
             "ai_groups",
             {"run_id": "eq." + run_id, "ai_analysis_job_id": "not.is.null", "select": "id"},
         )
@@ -382,7 +493,7 @@ class SupabaseRepository:
 
     def groups(self, run_id: str) -> list[dict[str, Any]]:
         links = self.group_links(run_id)
-        rows = self._select("ai_groups", {"run_id": "eq." + run_id, "order": "created_at.asc,id.asc"})
+        rows = self._select_all("ai_groups", {"run_id": "eq." + run_id, "order": "created_at.asc,id.asc"})
         out = []
         for row in rows:
             row = dict(row)
@@ -391,11 +502,11 @@ class SupabaseRepository:
         return out
 
     def group_links(self, run_id: str) -> dict[str, list[str]]:
-        groups = self._select("ai_groups", {"run_id": "eq." + run_id})
+        groups = self._select_all("ai_groups", {"run_id": "eq." + run_id})
         group_ids = [row["id"] for row in groups]
         if not group_ids:
             return {}
-        rows = self._select(
+        rows = self._select_all(
             "ai_group_occurrences",
             {
                 "group_id": "in.(" + ",".join(group_ids) + ")",
@@ -430,10 +541,10 @@ class SupabaseRepository:
         return out
 
     def next_steps(self, run_id: str) -> list[dict[str, Any]]:
-        return self._select("recommended_actions", {"run_id": "eq." + run_id, "order": "created_at.asc,id.asc"})
+        return self._select_all("recommended_actions", {"run_id": "eq." + run_id, "order": "created_at.asc,id.asc"})
 
     def performance(self, run_id: str) -> list[dict[str, Any]]:
-        rows = self._select("run_delays", {"run_id": "eq." + run_id, "order": "delay_seconds.desc,testcase_node_id.asc"})
+        rows = self._select_all("run_delays", {"run_id": "eq." + run_id, "order": "delay_seconds.desc,testcase_node_id.asc"})
         return [delay_api_row(row) for row in rows]
 
     def testcase_hierarchy(self, module_slug: str | None = None) -> list[dict[str, Any]]:
@@ -444,7 +555,6 @@ class SupabaseRepository:
                 return []
             params["module_id"] = "eq." + module["id"]
         rows = self._select_all("testcase_hierarchy", params)
-        rows.sort(key=lambda row: (str(row.get("module_code") or ""), _node_sort_key(str(row.get("node_id") or ""))))
         return [hierarchy_api_row(row) for row in rows]
 
     def payload(self, run_id: str) -> dict[str, Any] | None:
@@ -464,6 +574,72 @@ class SupabaseRepository:
 
     def rerun_requests(self) -> list[dict[str, Any]]:
         return self._select("rerun_requests", {"order": "created_at.desc", "limit": "100"})
+
+    def bridge_requested_rerun_requests(self) -> list[dict[str, Any]]:
+        return self._select(
+            "rerun_requests",
+            {
+                "status": "in.(requested,solicitado)",
+                "order": "created_at.asc",
+            },
+        )
+
+    def bridge_active_rerun_requests(self, statuses: list[str] | None = None) -> list[dict[str, Any]]:
+        statuses = statuses or [
+            "enviado_jenkins",
+            "na_fila",
+            "rodando",
+            "processando",
+            "erro_monitoramento",
+            "cancelando",
+        ]
+        return self._select(
+            "rerun_requests",
+            {
+                "execution_status": "in.(" + ",".join(statuses) + ")",
+                "order": "created_at.desc",
+                "limit": "50",
+            },
+        )
+
+    def bridge_cancel_requested_rerun_requests(self, statuses: list[str] | None = None) -> list[dict[str, Any]]:
+        statuses = statuses or ["cancel_requested", "cancelamento_solicitado"]
+        return self._select(
+            "rerun_requests",
+            {
+                "status": "in.(" + ",".join(statuses) + ")",
+                "order": "updated_at.asc",
+            },
+        )
+
+    def bridge_claim_rerun_request(self, request_id: str) -> bool:
+        updated = self._rest_json(
+            "PATCH",
+            "/" + self._table("rerun_requests"),
+            {
+                "status": "processando",
+                "execution_status": "processando",
+                "updated_at": now_iso(),
+            },
+            query={
+                "id": "eq." + str(request_id),
+                "status": "in.(requested,solicitado)",
+            },
+            extra_headers={"Prefer": "return=representation"},
+        )
+        return bool(updated)
+
+    def bridge_update_rerun_request(self, request_id: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+        body = dict(fields)
+        body["updated_at"] = now_iso()
+        updated = self._rest_json(
+            "PATCH",
+            "/" + self._table("rerun_requests"),
+            body,
+            query={"id": "eq." + str(request_id)},
+            extra_headers={"Prefer": "return=representation"},
+        )
+        return updated[0] if updated else None
 
     def record_rerun_request(self, request: dict[str, Any]) -> dict[str, Any]:
         now = now_iso()
@@ -522,80 +698,6 @@ class SupabaseRepository:
             extra_headers={"Prefer": "return=representation"},
         )
         return updated[0] if updated else None
-
-    def ensure_bucket(self) -> None:
-        if self.dry_run:
-            return
-        try:
-            self._storage_json("GET", f"/bucket/{quote(self.bucket, safe='')}")
-            return
-        except SupabaseHttpError as exc:
-            if exc.status != 404:
-                raise
-        self._storage_json(
-            "POST",
-            "/bucket",
-            {
-                "id": self.bucket,
-                "name": self.bucket,
-                "public": self.storage_public,
-            },
-        )
-
-    def upload_file(self, local_path: str | Path, storage_path: str, mime_type: str | None) -> dict[str, Any]:
-        local_path = Path(local_path)
-        if not local_path.exists() or not local_path.is_file():
-            raise FileNotFoundError(str(local_path))
-        self.plan["uploads"] += 1
-        if self.dry_run:
-            return {
-                "bucket": self.bucket,
-                "storage_path": storage_path,
-                "public_url": self.public_url(storage_path) if self.storage_public else "",
-                "signed_url": "",
-                "signed_url_expires_at": None,
-            }
-        content = local_path.read_bytes()
-        quoted_path = quote(storage_path.replace("\\", "/"), safe="/")
-        self._storage_bytes(
-            "POST",
-            f"/object/{quote(self.bucket, safe='')}/{quoted_path}",
-            content,
-            {
-                "Content-Type": mime_type or "application/octet-stream",
-                "x-upsert": "true",
-            },
-        )
-        signed_url = ""
-        signed_expires_at = None
-        if not self.storage_public:
-            signed_url = self.create_signed_url(storage_path, SIGNED_URL_SECONDS)
-            signed_expires_at = (
-                datetime.now(timezone.utc) + timedelta(seconds=SIGNED_URL_SECONDS)
-            ).isoformat(timespec="seconds")
-        return {
-            "bucket": self.bucket,
-            "storage_path": storage_path,
-            "public_url": self.public_url(storage_path) if self.storage_public else "",
-            "signed_url": signed_url,
-            "signed_url_expires_at": signed_expires_at,
-        }
-
-    def public_url(self, storage_path: str) -> str:
-        return f"{self.url}/storage/v1/object/public/{quote(self.bucket, safe='')}/{quote(storage_path, safe='/')}"
-
-    def create_signed_url(self, storage_path: str, expires_in: int) -> str:
-        result = self._storage_json(
-            "POST",
-            f"/object/sign/{quote(self.bucket, safe='')}/{quote(storage_path, safe='/')}",
-            {"expiresIn": expires_in},
-        )
-        signed = result.get("signedURL") or result.get("signedUrl") or result.get("signed_url")
-        if not signed:
-            return ""
-        if signed.startswith("http"):
-            return signed
-        return self.url + "/storage/v1" + signed
 
     def _import_hierarchy(self, payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
         now = now_iso()
@@ -711,7 +813,7 @@ class SupabaseRepository:
             local_path = source.get("caminho_evidencia") or ""
             mime_type = source.get("mime_type") or "application/octet-stream"
             try:
-                upload = self.upload_file(local_path, source.get("storage_path") or "", mime_type)
+                upload = self.storage.upload_file(local_path, source.get("storage_path") or "", mime_type)
             except Exception as exc:
                 self.plan["skipped_evidence"] += 1
                 self.plan["upload_errors"].append(
@@ -731,7 +833,7 @@ class SupabaseRepository:
                 "file_type": file_type(mime_type, source.get("extensao"), role),
                 "original_name": source.get("nome_arquivo") or Path(local_path).name,
                 "local_path": local_path,
-                "storage_provider": "supabase",
+                "storage_provider": self.storage.provider,
                 "storage_bucket": upload["bucket"],
                 "storage_path": upload["storage_path"],
                 "public_url": upload["public_url"],
@@ -861,18 +963,38 @@ class SupabaseRepository:
         table: str,
         params: dict[str, str] | None = None,
         *,
-        page_size: int = 1000,
+        chunk_size: int = 1000,
     ) -> list[dict[str, Any]]:
-        all_rows: list[dict[str, Any]] = []
+        out: list[dict[str, Any]] = []
         offset = 0
-        base_params = dict(params or {})
         while True:
-            page_params = {**base_params, "limit": str(page_size), "offset": str(offset)}
-            rows = self._select(table, page_params)
-            all_rows.extend(rows)
-            if len(rows) < page_size:
-                return all_rows
-            offset += page_size
+            query = dict(params or {})
+            query["limit"] = str(chunk_size)
+            query["offset"] = str(offset)
+            rows = self._select(table, query)
+            if not rows:
+                break
+            out.extend(rows)
+            if len(rows) < chunk_size:
+                break
+            offset += chunk_size
+        return out
+
+    def _select_where_in(
+        self,
+        table: str,
+        column: str,
+        values: list[str],
+        params: dict[str, str] | None = None,
+    ) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for chunk in chunks(values, 250):
+            if not chunk:
+                continue
+            query = dict(params or {})
+            query[column] = "in.(" + ",".join(chunk) + ")"
+            out.extend(self._select_all(table, query))
+        return out
 
     def _delete(self, table: str, params: dict[str, str]) -> None:
         if self.dry_run:
@@ -883,6 +1005,25 @@ class SupabaseRepository:
             query=params,
             extra_headers={"Prefer": "return=minimal"},
         )
+
+    def _delete_with_in(self, table: str, column: str, values: list[str]) -> None:
+        for chunk in chunks(values, 250):
+            if chunk:
+                self._delete(table, {column: "in.(" + ",".join(chunk) + ")"})
+
+    def _patch_with_in(self, table: str, column: str, values: list[str], body: dict[str, Any]) -> None:
+        if self.dry_run:
+            return
+        for chunk in chunks(values, 250):
+            if not chunk:
+                continue
+            self._rest_json(
+                "PATCH",
+                "/" + self._table(table),
+                body,
+                query={column: "in.(" + ",".join(chunk) + ")"},
+                extra_headers={"Prefer": "return=minimal"},
+            )
 
     def _table(self, logical_name: str) -> str:
         return self.table_prefix + logical_name
@@ -909,25 +1050,6 @@ class SupabaseRepository:
             headers.update(extra_headers)
         data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
         return self._request_json(method, self.url + "/rest/v1" + path, headers, data, query)
-
-    def _storage_json(self, method: str, path: str, body: Any | None = None) -> Any:
-        headers = {
-            "Accept": "application/json",
-            "apikey": self.service_key,
-            "Authorization": "Bearer " + self.service_key,
-        }
-        if body is not None:
-            headers["Content-Type"] = "application/json"
-        data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
-        return self._request_json(method, self.url + "/storage/v1" + path, headers, data, None)
-
-    def _storage_bytes(self, method: str, path: str, body: bytes, extra_headers: dict[str, str]) -> bytes:
-        headers = {
-            "apikey": self.service_key,
-            "Authorization": "Bearer " + self.service_key,
-            **extra_headers,
-        }
-        return self._request_bytes(method, self.url + "/storage/v1" + path, headers, body, None)
 
     def _request_json(
         self,
@@ -981,6 +1103,17 @@ def read_env(path: str | Path) -> dict[str, str]:
         "SUPABASE_BUCKET_PUBLIC",
         "SUPABASE_SCHEMA",
         "SUPABASE_TABLE_PREFIX",
+        "AGENT_TC_STORAGE",
+        "AGENT_TC_STORAGE_BUCKET",
+        "AGENT_TC_STORAGE_ROOT",
+        "AGENT_TC_PUBLIC_BASE_URL",
+        "STORAGE_PROVIDER",
+        "LOCAL_STORAGE_ROOT",
+        "LOCAL_STORAGE_PUBLIC_BASE_URL",
+        "POSTGRES_DSN",
+        "DATABASE_URL",
+        "POSTGRES_SCHEMA",
+        "POSTGRES_TABLE_PREFIX",
     ):
         if os.getenv(key):
             values[key] = os.environ[key]
@@ -1040,16 +1173,6 @@ def _ai_response_debug(response: Any) -> dict[str, Any]:
     if isinstance(validated, dict):
         out["validated_clusters"] = len(validated.get("clusters") or [])
     return out
-
-
-def _node_sort_key(node_id: str) -> tuple[int, ...]:
-    parts = []
-    for item in node_id.split("."):
-        try:
-            parts.append(int(item))
-        except ValueError:
-            parts.append(0)
-    return tuple(parts)
 
 
 def _rerun_request_is_terminal(row: dict[str, Any]) -> bool:

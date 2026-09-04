@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+import mimetypes
+import os
+from datetime import date, datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -22,6 +24,7 @@ from .ai_grouping import (
 from .api_repository import LocalPayloadRepository
 from .auth import AuthenticationError, SupabaseAuthValidator
 from .pipeline import run_shadow_pipeline
+from .storage import safe_storage_target
 
 
 class AgentTcApi:
@@ -43,13 +46,16 @@ class AgentTcApi:
         self.openai_client = openai_client
         self.auth_validator = auth_validator
         self.require_ai_auth = require_ai_auth
+        self.local_files_root = _local_files_root(self.env_path)
 
-    def route_get(self, path: str, query: dict[str, list[str]]) -> tuple[int, Any]:
+    def route_get(self, path: str, query: dict[str, list[str]], authorization: str | None = None) -> tuple[int, Any]:
         parts = _path_parts(path)
         if not parts:
             return HTTPStatus.OK, self.index()
         if parts == ["health"]:
             return HTTPStatus.OK, {"ok": True, "service": "agent-tc-api"}
+        if len(parts) == 3 and parts[0] == "bridge" and parts[1] == "rerun-requests":
+            return self._bridge_get(parts[2], authorization)
         if parts == ["modules"]:
             return HTTPStatus.OK, self.repository.modules()
         if len(parts) == 3 and parts[0] == "modules" and parts[2] == "runs":
@@ -91,6 +97,8 @@ class AgentTcApi:
             if isinstance(result, dict) and result.get("error") == "rerun_request_not_cancellable":
                 return HTTPStatus.CONFLICT, {"ok": False, **result}
             return HTTPStatus.ACCEPTED, {"ok": True, "rerun_request": result}
+        if len(parts) == 4 and parts[0] == "bridge" and parts[1] == "rerun-requests":
+            return self._bridge_post(parts[2], parts[3], body, authorization)
         return HTTPStatus.NOT_FOUND, {"error": "not_found", "path": path}
 
     def index(self) -> dict[str, Any]:
@@ -119,10 +127,54 @@ class AgentTcApi:
                 "GET /rerun-requests",
                 "POST /rerun-requests",
                 "POST /rerun-requests/{id}/cancel",
+                "GET /bridge/rerun-requests/requested",
+                "GET /bridge/rerun-requests/active",
+                "GET /bridge/rerun-requests/cancel-requested",
+                "POST /bridge/rerun-requests/{id}/claim",
+                "POST /bridge/rerun-requests/{id}/update",
                 "POST /analyze",
                 "POST /runs/{id}/ai-group",
             ],
         }
+
+    def _bridge_get(self, child: str, authorization: str | None) -> tuple[int, Any]:
+        auth_error = self._bridge_auth_error(authorization)
+        if auth_error:
+            return auth_error
+        if child == "requested":
+            if hasattr(self.repository, "bridge_requested_rerun_requests"):
+                return HTTPStatus.OK, self.repository.bridge_requested_rerun_requests()
+        if child == "active":
+            if hasattr(self.repository, "bridge_active_rerun_requests"):
+                return HTTPStatus.OK, self.repository.bridge_active_rerun_requests()
+        if child == "cancel-requested":
+            if hasattr(self.repository, "bridge_cancel_requested_rerun_requests"):
+                return HTTPStatus.OK, self.repository.bridge_cancel_requested_rerun_requests()
+        return HTTPStatus.NOT_IMPLEMENTED, {"ok": False, "error": "repository_does_not_support_bridge"}
+
+    def _bridge_post(self, request_id: str, action: str, body: dict[str, Any], authorization: str | None) -> tuple[int, Any]:
+        auth_error = self._bridge_auth_error(authorization)
+        if auth_error:
+            return auth_error
+        if action == "claim":
+            if not hasattr(self.repository, "bridge_claim_rerun_request"):
+                return HTTPStatus.NOT_IMPLEMENTED, {"ok": False, "error": "repository_does_not_support_bridge"}
+            return HTTPStatus.OK, {"ok": True, "claimed": bool(self.repository.bridge_claim_rerun_request(request_id))}
+        if action == "update":
+            if not hasattr(self.repository, "bridge_update_rerun_request"):
+                return HTTPStatus.NOT_IMPLEMENTED, {"ok": False, "error": "repository_does_not_support_bridge"}
+            row = self.repository.bridge_update_rerun_request(request_id, body)
+            return (HTTPStatus.OK, {"ok": True, "rerun_request": row}) if row else (HTTPStatus.NOT_FOUND, {"ok": False, "error": "rerun_request_not_found"})
+        return HTTPStatus.NOT_FOUND, {"ok": False, "error": "bridge_action_not_found", "action": action}
+
+    def _bridge_auth_error(self, authorization: str | None) -> tuple[int, Any] | None:
+        token = _env_value(self.env_path, "AGENT_TC_BRIDGE_TOKEN")
+        if not token:
+            return None
+        expected = "Bearer " + token
+        if authorization != expected:
+            return HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized_bridge"}
+        return None
 
     def _run_child(self, run_id: str, child: str) -> tuple[int, Any]:
         if not self.repository.run(run_id):
@@ -317,7 +369,10 @@ class AgentTcRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         try:
             parsed = urlparse(self.path)
-            status, payload = self.api.route_get(parsed.path, parse_qs(parsed.query))
+            if parsed.path.startswith("/files/"):
+                self._send_file(parsed.path[len("/files/") :])
+                return
+            status, payload = self.api.route_get(parsed.path, parse_qs(parsed.query), self.headers.get("Authorization"))
             self._send(status, payload)
         except Exception as exc:
             self._send(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": type(exc).__name__, "message": str(exc)})
@@ -347,7 +402,7 @@ class AgentTcRequestHandler(BaseHTTPRequestHandler):
     def _send(self, status: int, payload: Any) -> None:
         body = b""
         if payload is not None:
-            body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+            body = json.dumps(payload, ensure_ascii=False, indent=2, default=json_default).encode("utf-8")
         self.send_response(int(status))
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
@@ -357,6 +412,28 @@ class AgentTcRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if body:
             self.wfile.write(body)
+
+    def _send_file(self, storage_path: str) -> None:
+        if not self.api.local_files_root:
+            self._send(HTTPStatus.NOT_FOUND, {"error": "local_storage_not_enabled"})
+            return
+        try:
+            target = safe_storage_target(self.api.local_files_root, unquote(storage_path))
+        except ValueError:
+            self._send(HTTPStatus.BAD_REQUEST, {"error": "invalid_storage_path"})
+            return
+        if not target.exists() or not target.is_file():
+            self._send(HTTPStatus.NOT_FOUND, {"error": "file_not_found"})
+            return
+        mime_type, _ = mimetypes.guess_type(str(target))
+        content = target.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Type", mime_type or "application/octet-stream")
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header("Cache-Control", "private, max-age=3600")
+        self.end_headers()
+        self.wfile.write(content)
 
 
 def make_server(
@@ -392,10 +469,20 @@ def _path_parts(path: str) -> list[str]:
     return [unquote(part) for part in path.strip("/").split("/") if part]
 
 
+def json_default(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat(timespec="seconds")
+    if isinstance(value, date):
+        return value.isoformat()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def _repository_mode(repository: Any) -> str:
     name = repository.__class__.__name__
     if name == "SupabaseRepository":
         return "supabase"
+    if name == "PostgresRepository":
+        return "postgres"
     if name == "SQLiteRepository":
         return "sqlite"
     return "local-json"
@@ -404,3 +491,38 @@ def _repository_mode(repository: Any) -> str:
 def _first(query: dict[str, list[str]], key: str) -> str | None:
     values = query.get(key) or []
     return values[0] if values else None
+
+
+def _local_files_root(env_path: Path | None) -> Path | None:
+    env = _read_env(env_path)
+    provider = (env.get("AGENT_TC_STORAGE") or env.get("STORAGE_PROVIDER") or "supabase").strip().lower()
+    if provider not in {"local", "file", "filesystem"}:
+        return None
+    root = env.get("AGENT_TC_STORAGE_ROOT") or env.get("LOCAL_STORAGE_ROOT")
+    return Path(root) if root else None
+
+
+def _env_value(env_path: Path | None, key: str) -> str:
+    env = _read_env(env_path)
+    return env.get(key) or ""
+
+
+def _read_env(path: Path | None) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if path and path.exists():
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip().strip('"').strip("'")
+    for key in (
+        "AGENT_TC_STORAGE",
+        "AGENT_TC_STORAGE_ROOT",
+        "STORAGE_PROVIDER",
+        "LOCAL_STORAGE_ROOT",
+        "AGENT_TC_BRIDGE_TOKEN",
+    ):
+        if os.getenv(key):
+            values[key] = os.environ[key]
+    return values

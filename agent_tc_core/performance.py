@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import uuid
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ from .config import RunContext
 
 
 TIME_LINE_RE = re.compile(
-    r"^(?P<case>\d+(?:\.\d+)*)\s+-\s+(?P<delta>\d{2}:\d{2}:\d{2})\s+MAIS\s+(?P<kind>LENTO|R.PIDO)\s+-+\s+"
+    r"^(?P<case>\d+(?:\.\d+)*)\s+-\s+(?P<delta>\d{2}:\d{2}:\d{2})\s+MAIS\s+(?P<kind>LENTO|RAPIDO)\s+-+\s+"
     r"Planilha:\s+(?P<expected>\d{2}:\d{2}:\d{2})\s+\|\s+Atual:\s+(?P<actual>\d{2}:\d{2}:\d{2})",
     re.IGNORECASE,
 )
@@ -47,18 +48,25 @@ def parse_times_file(path: str | Path) -> list[DelayRow]:
         line = raw.strip()
         if not line:
             continue
-        match = TIME_LINE_RE.match(line)
+        match = TIME_LINE_RE.match(normalize_time_line(line))
         if not match:
             continue
         expected = hms_to_seconds(match.group("expected"))
         actual = hms_to_seconds(match.group("actual"))
         delta = hms_to_seconds(match.group("delta"))
-        is_fast = "PIDO" in match.group("kind").upper()
-        status = "mais_rapido" if is_fast else "mais_lento"
-        delay = -delta if is_fast else delta
-        if status == "mais_lento" and actual <= expected:
-            continue
-        if status == "mais_rapido" and actual >= expected:
+        kind = match.group("kind").lower()
+        if kind == "lento":
+            status = "mais_lento"
+            if actual <= expected:
+                continue
+            measured_delta = actual - expected
+        else:
+            status = "mais_rapido"
+            if actual >= expected:
+                continue
+            measured_delta = expected - actual
+        delay = delta or measured_delta
+        if delay <= 0:
             continue
         rows.append(
             DelayRow(
@@ -111,12 +119,17 @@ def build_delay_payload_rows(
                 "created_at": created_at,
             }
         )
-    return sorted(out, key=lambda row: (-abs(int(row["delay_segundos"])), str(row["codigo_teste"])))
+    return sorted(out, key=lambda row: (-int(row["delay_segundos"]), str(row["codigo_teste"])))
 
 
 def hms_to_seconds(value: str) -> int:
     hours, minutes, seconds = [int(part) for part in value.strip().split(":")]
     return hours * 3600 + minutes * 60 + seconds
+
+
+def normalize_time_line(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value)
+    return "".join(char for char in normalized if not unicodedata.combining(char))
 
 
 def _read_text(path: Path) -> str:

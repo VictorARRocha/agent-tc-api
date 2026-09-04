@@ -1,0 +1,11 @@
+.env
+*.log
+*.pyc
+*.pyo
+__pycache__/
+logs/
+data/
+logs_shadow/
+JenkinsBridge/.env
+JenkinsBridge/logs/
+database/backups/

@@ -10,6 +10,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent_tc_core.api_server import make_server
+from agent_tc_core.postgres_repository import PostgresRepository
 from agent_tc_core.sqlite_repository import SQLiteRepository
 from agent_tc_core.supabase_repository import SupabaseRepository
 
@@ -34,7 +35,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--backend",
-        choices=["local-json", "sqlite", "supabase"],
+        choices=["local-json", "sqlite", "supabase", "postgres"],
         default=default_backend(),
         help="Fonte de dados da API.",
     )
@@ -46,8 +47,11 @@ def main() -> int:
     parser.add_argument(
         "--env",
         default=str(PROJECT_ROOT / ".env"),
-        help="Arquivo .env usado quando --backend supabase.",
+        help="Arquivo .env usado por supabase/postgres.",
     )
+    parser.add_argument("--postgres-dsn", help="DSN PostgreSQL usado quando --backend postgres.")
+    parser.add_argument("--postgres-schema", default="public", help="Schema usado quando --backend postgres.")
+    parser.add_argument("--postgres-table-prefix", default="agent_tc_", help="Prefixo das tabelas quando --backend postgres.")
     parser.add_argument(
         "--supabase-schema",
         default="public",
@@ -76,6 +80,14 @@ def main() -> int:
             table_prefix=args.supabase_table_prefix,
         )
         repository.initialize()
+    elif args.backend == "postgres":
+        repository = PostgresRepository(
+            env_path=args.env,
+            dsn=args.postgres_dsn,
+            schema=args.postgres_schema,
+            table_prefix=args.postgres_table_prefix,
+        )
+        repository.initialize()
 
     server = make_server(
         args.host,
@@ -93,6 +105,10 @@ def main() -> int:
     if args.backend == "supabase":
         print(f"supabase_schema={args.supabase_schema}")
         print(f"supabase_table_prefix={args.supabase_table_prefix}")
+        print(f"env={args.env}")
+    if args.backend == "postgres":
+        print(f"postgres_schema={args.postgres_schema}")
+        print(f"postgres_table_prefix={args.postgres_table_prefix}")
         print(f"env={args.env}")
     print(f"logs_root={args.logs_root}")
     try:

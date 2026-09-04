@@ -18,6 +18,14 @@ services:
         value: agent_tc_
       - key: AGENT_TC_BACKEND
         value: supabase
+      - key: AGENT_TC_STORAGE
+        value: supabase
+      - key: POSTGRES_DSN
+        sync: false
+      - key: POSTGRES_SCHEMA
+        value: public
+      - key: POSTGRES_TABLE_PREFIX
+        value: agent_tc_
       - key: AI_PROVIDER
         value: openai
       - key: AI_TIMEOUT_SECONDS
