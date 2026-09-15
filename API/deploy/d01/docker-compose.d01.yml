@@ -17,8 +17,8 @@ services:
 
   api:
     build:
-      context: ../..
-      dockerfile: Dockerfile
+      context: ../../..
+      dockerfile: API/Dockerfile
     image: agent-tc-api:local
     container_name: agent-tc-api
     restart: unless-stopped

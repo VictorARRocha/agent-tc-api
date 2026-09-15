@@ -4,14 +4,14 @@ Este guia prepara a D01 para hospedar a API do Agent TC e um PostgreSQL local em
 
 ## Arquivos
 
-- `Dockerfile`: imagem da API.
-- `docker-compose.d01.yml`: sobe API + PostgreSQL + volumes.
-- `docker.env.example`: modelo de variaveis sem segredos.
+- `API\Dockerfile`: imagem da API.
+- `API\deploy\d01\docker-compose.d01.yml`: sobe API + PostgreSQL + volumes.
+- `API\deploy\d01\docker.env.example`: modelo de variaveis sem segredos.
 - `docker.env`: arquivo real da D01, criado manualmente a partir do exemplo.
 
 ## Preparar variaveis
 
-Na D01, dentro da pasta `C:\TC\Util Compartilhado\AgenteTC\deploy\d01`:
+Na D01, dentro da pasta `C:\TC\Util Compartilhado\AgenteTC\API\deploy\d01`:
 
 ```powershell
 copy docker.env.example docker.env
@@ -134,7 +134,7 @@ docker compose --env-file docker.env -f docker-compose.d01.yml up -d --force-rec
 - A porta publicada da API vem de `AGENT_TC_API_PORT`, por padrao `8000`.
 - Os arquivos de evidencia ficam no volume Docker `agent-tc-evidencias` e sao servidos pela API em `/files/...`.
 - O volume `agent-tc-postgres-data` guarda os dados do banco; backup precisa ser definido pela infra.
-- Esta pasta `deploy\d01` precisa ficar dentro da pasta do projeto `AgenteTC`, porque o compose usa `..\..` como contexto de build para encontrar `Dockerfile`, `agent_tc_core`, `cli` e `database`.
+- Esta pasta `API\deploy\d01` precisa ficar dentro da pasta do projeto `AgenteTC`, porque o compose usa `..\..\..` como contexto de build para encontrar `API\Dockerfile` e `PythonRodagem`.
 - Para parar os containers sem apagar os volumes:
 
 ```powershell

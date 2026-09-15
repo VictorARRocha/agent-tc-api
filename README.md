@@ -4,22 +4,21 @@ Projeto do Agent TC para substituir o pos-processamento manual do Codex CLI por 
 
 ## Estrutura
 
-- `agent_tc_core/`: pacote principal Python. Faz parsing da rodagem, extracao, evidencias, MDS, API e persistencia.
-- `cli/`: comandos Python de operacao.
-  - `agent_tc_ingest.py`: analisa uma pasta de rodagem e envia ao backend.
-  - `agent_tc_api.py`: sobe a API consumida pelo dashboard.
-  - `agent_tc_db.py`: utilitarios de banco, resumo e importacao.
-- `database/`: scripts SQL do modelo canonico.
+- `API/`: scripts, Dockerfile e deploy da API consumida pelo dashboard.
+- `JenkinsBridge/`: bridge que le pedidos da API e aciona Jenkins.
+- `PythonRodagem/`: pos-rodagem em Python, parser de compactados, leitura de MDS/PJS, persistencia e migrations.
+  - `agent_tc_core/`: pacote principal Python.
+  - `cli/`: comandos Python de operacao.
+  - `database/`: scripts SQL do modelo canonico.
+  - `tests/`: testes de regressao e comportamento do pipeline.
 - `docs/`: documentacao de setup, banco, API, deploy e historico do projeto.
-- `JenkinsBridge/`: bridge atual do Jenkins.
-- `logs/`: logs de runtime da API local.
-- `tests/`: testes de regressao e comportamento do pipeline.
 
 ## Entradas principais
 
-- `run_agent_tc_python.bat`: deve ser chamado no pos-rodagem para processar a pasta mais recente da VM ou uma pasta informada.
-- `run_agent_tc_api.bat`: sobe a API em `0.0.0.0:8000`.
-- `start_agent_tc_api_hidden.vbs`: inicia a API escondida na VM que hospeda o Bridge.
+- `PythonRodagem/run_agent_tc_python.bat`: deve ser chamado no pos-rodagem para processar a pasta mais recente da VM ou uma pasta informada.
+- `API/run_agent_tc_api.bat`: sobe a API em `0.0.0.0:8000` fora do Docker.
+- `API/start_agent_tc_api_hidden.vbs`: inicia a API escondida na VM que hospeda o Bridge.
+- Wrappers com os nomes antigos continuam na raiz para compatibilidade.
 
 ## Modo recomendado na SCI
 
@@ -42,7 +41,7 @@ O primeiro cadastro vira admin aprovado automaticamente para bootstrap. As senha
 
 ## Documentacao
 
-- `deploy/d01/DEPLOY_D01_DOCKER.md`: guia operacional atual para API + PostgreSQL + storage local na D01.
+- `API/deploy/d01/DEPLOY_D01_DOCKER.md`: guia operacional atual para API + PostgreSQL + storage local na D01.
 - `docs/RESUMO_MIGRACAO_5_ETAPAS.md`: resumo atual da migracao Supabase/Postgres/storage/Bridge/Auth.
 - `docs/CANONICAL_DATA_MODEL.md`: modelo canonico do banco.
 - `docs/legacy/`: analises e documentos antigos preservados apenas como historico.

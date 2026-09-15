@@ -11,7 +11,7 @@ from .config import RunContext
 
 
 TIME_LINE_RE = re.compile(
-    r"^(?P<case>\d+(?:\.\d+)*)\s+-\s+(?P<delta>\d{2}:\d{2}:\d{2})\s+MAIS\s+(?P<kind>LENTO|RAPIDO)\s+-+\s+"
+    r"^(?P<case>\d+(?:\.\d+)*)\s+-\s+(?P<delta>\d{2}:\d{2}:\d{2})\s+MAIS\s+(?P<kind>LENTO|RAPIDO|R.PIDO)\s+-+\s+"
     r"Planilha:\s+(?P<expected>\d{2}:\d{2}:\d{2})\s+\|\s+Atual:\s+(?P<actual>\d{2}:\d{2}:\d{2})",
     re.IGNORECASE,
 )
@@ -60,14 +60,17 @@ def parse_times_file(path: str | Path) -> list[DelayRow]:
             if actual <= expected:
                 continue
             measured_delta = actual - expected
+            delay = delta or measured_delta
+            if delay <= 0:
+                continue
         else:
             status = "mais_rapido"
             if actual >= expected:
                 continue
-            measured_delta = expected - actual
-        delay = delta or measured_delta
-        if delay <= 0:
-            continue
+            measured_delta = actual - expected
+            delay = -(delta or abs(measured_delta))
+            if delay >= 0:
+                continue
         rows.append(
             DelayRow(
                 testcase_node_id=match.group("case"),

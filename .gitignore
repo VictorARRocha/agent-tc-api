@@ -1,4 +1,6 @@
 .env
+API/.env
+PythonRodagem/.env
 *.log
 *.pyc
 *.pyo
@@ -6,7 +8,12 @@ __pycache__/
 logs/
 data/
 logs_shadow/
+API/logs/
+PythonRodagem/logs/
+PythonRodagem/logs_shadow/
 JenkinsBridge/.env
 JenkinsBridge/logs/
 database/backups/
+PythonRodagem/database/backups/
 deploy/**/docker.env
+API/deploy/**/docker.env
