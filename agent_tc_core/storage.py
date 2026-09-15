@@ -273,8 +273,9 @@ def storage_from_env(
     default_bucket: str,
     storage_public: bool,
     dry_run: bool,
+    default_provider: str = "supabase",
 ) -> StorageAdapter:
-    provider = (env.get("AGENT_TC_STORAGE") or env.get("STORAGE_PROVIDER") or "supabase").strip().lower()
+    provider = (env.get("AGENT_TC_STORAGE") or env.get("STORAGE_PROVIDER") or default_provider).strip().lower()
     bucket = env.get("AGENT_TC_STORAGE_BUCKET") or env.get("SUPABASE_BUCKET") or default_bucket
     if provider == "supabase":
         return SupabaseStorageAdapter(

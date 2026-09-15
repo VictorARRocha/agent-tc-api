@@ -17,7 +17,7 @@ if exist "%ENV_FILE%" (
 
 if "%AGENT_TC_API_HOST%"=="" set "AGENT_TC_API_HOST=0.0.0.0"
 if "%AGENT_TC_API_PORT%"=="" set "AGENT_TC_API_PORT=8000"
-if "%AGENT_TC_BACKEND%"=="" set "AGENT_TC_BACKEND=supabase"
+if "%AGENT_TC_BACKEND%"=="" set "AGENT_TC_BACKEND=postgres"
 set "PY_CMD=python"
 
 py -3 --version > nul 2>&1

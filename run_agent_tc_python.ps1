@@ -37,7 +37,7 @@ $PracticeMdsPaths = Get-ConfigValue "AGENT_TC_PRACTICE_MDS_PATHS" "C:\TC\TC12 - 
 $PracticeProjectSuite = Get-ConfigValue "AGENT_TC_PRACTICE_PROJECT_SUITE" "C:\TC\TC12 - Simplificado\TestesVisualPractice.pjs"
 $SupremaMdsPath = Get-ConfigValue "AGENT_TC_SUPREMA_MDS_PATH" "C:\TC\tc12\PROJETO-TC12\Integracoes\Integracoes.mds"
 $LogsBase = Get-ConfigValue "AGENT_TC_LOGS_BASE" "S:\Teste automatico\Arquivos\Arquivos De Log\ArquivosCompactados"
-$Backend = Get-ConfigValue "AGENT_TC_BACKEND" "supabase"
+$Backend = Get-ConfigValue "AGENT_TC_BACKEND" "api"
 $SystemHint = Get-ConfigValue "AGENT_TC_SYSTEM" ""
 
 $MdsExplicit = $true

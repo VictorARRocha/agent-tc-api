@@ -19,7 +19,8 @@ from .supabase_repository import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-POSTGRES_SCHEMA = ROOT / "database" / "postgres" / "001_initial.sql"
+POSTGRES_MIGRATIONS = ROOT / "database" / "postgres"
+POSTGRES_SCHEMA = POSTGRES_MIGRATIONS / "001_initial.sql"
 
 
 class PostgresRepository(SupabaseRepository):
@@ -49,6 +50,7 @@ class PostgresRepository(SupabaseRepository):
             default_bucket=bucket or env.get("AGENT_TC_STORAGE_BUCKET") or env.get("SUPABASE_BUCKET") or DEFAULT_BUCKET,
             storage_public=self.storage_public,
             dry_run=dry_run,
+            default_provider="local",
         )
         self.bucket = self.storage.bucket
         self.plan: dict[str, Any] = {
@@ -74,7 +76,8 @@ class PostgresRepository(SupabaseRepository):
         conn = self.connect()
         try:
             with conn.cursor() as cursor:
-                cursor.execute(self._schema_sql())
+                for sql in self._schema_sqls():
+                    cursor.execute(sql)
             conn.commit()
         finally:
             conn.close()
@@ -238,6 +241,49 @@ class PostgresRepository(SupabaseRepository):
         finally:
             conn.close()
 
+    def auth_user_count(self) -> int:
+        conn = self.connect()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(f"SELECT count(*) AS count FROM {self._qualified_table('app_users')}")
+                row = cursor.fetchone()
+                return int(row["count"] if row else 0)
+        finally:
+            conn.close()
+
+    def auth_user_by_username(self, username_normalized: str) -> dict[str, Any] | None:
+        rows = self._select("app_users", {"username_normalized": "eq." + username_normalized, "limit": "1"})
+        return rows[0] if rows else None
+
+    def auth_user_by_id(self, user_id: str) -> dict[str, Any] | None:
+        rows = self._select("app_users", {"id": "eq." + user_id, "limit": "1"})
+        return rows[0] if rows else None
+
+    def auth_create_user(self, row: dict[str, Any]) -> dict[str, Any]:
+        self._upsert("app_users", [row], conflict="id")
+        return self.auth_user_by_id(str(row["id"])) or row
+
+    def auth_update_user(self, user_id: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+        rows = self._update("app_users", fields, {"id": "eq." + user_id}, returning=True)
+        return rows[0] if rows else None
+
+    def auth_list_users(self) -> list[dict[str, Any]]:
+        return self._select("app_users", {"order": "created_at.desc"})
+
+    def auth_create_session(self, row: dict[str, Any]) -> dict[str, Any]:
+        self._upsert("auth_sessions", [row], conflict="id")
+        return row
+
+    def auth_session_by_token_hash(self, token_hash: str) -> dict[str, Any] | None:
+        rows = self._select("auth_sessions", {"token_hash": "eq." + token_hash, "limit": "1"})
+        return rows[0] if rows else None
+
+    def auth_revoke_session(self, token_hash: str, revoked_at: str) -> None:
+        self._update("auth_sessions", {"revoked_at": revoked_at}, {"token_hash": "eq." + token_hash})
+
+    def auth_log_admin_action(self, row: dict[str, Any]) -> None:
+        self._upsert("admin_audit_log", [row], conflict="id")
+
     def _table(self, logical_name: str) -> str:
         return self.table_prefix + logical_name
 
@@ -245,7 +291,12 @@ class PostgresRepository(SupabaseRepository):
         return f"{_ident(self.schema)}.{_ident(self._table(logical_name))}"
 
     def _schema_sql(self) -> str:
-        sql = POSTGRES_SCHEMA.read_text(encoding="utf-8")
+        return "\n\n".join(self._schema_sqls())
+
+    def _schema_sqls(self) -> list[str]:
+        return [self._transform_schema_sql(path.read_text(encoding="utf-8")) for path in sorted(POSTGRES_MIGRATIONS.glob("*.sql"))]
+
+    def _transform_schema_sql(self, sql: str) -> str:
         sql = re.sub(
             r"CREATE SCHEMA IF NOT EXISTS\s+public;",
             f"CREATE SCHEMA IF NOT EXISTS {_ident(self.schema)};",

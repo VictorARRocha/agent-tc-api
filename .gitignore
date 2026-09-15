@@ -9,3 +9,4 @@ logs_shadow/
 JenkinsBridge/.env
 JenkinsBridge/logs/
 database/backups/
+deploy/**/docker.env

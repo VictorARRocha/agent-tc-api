@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,10 +20,15 @@ DEFAULT_DB = PROJECT_ROOT / "data" / "agent_tc.sqlite"
 DEFAULT_ENV = PROJECT_ROOT / ".env"
 
 
+def default_backend() -> str:
+    backend = os.getenv("AGENT_TC_BACKEND") or "postgres"
+    return backend if backend in {"sqlite", "supabase", "postgres"} else "postgres"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Agent TC maintenance routines")
     parser.add_argument("--db", default=str(DEFAULT_DB), help="Caminho do banco SQLite.")
-    parser.add_argument("--env", default=str(DEFAULT_ENV), help="Arquivo .env para Supabase.")
+    parser.add_argument("--env", default=str(DEFAULT_ENV), help="Arquivo .env do backend.")
     parser.add_argument("--supabase-schema", default="public", help="Schema usado no Supabase.")
     parser.add_argument("--supabase-table-prefix", default="agent_tc_", help="Prefixo das tabelas no Supabase.")
     parser.add_argument("--postgres-dsn", help="DSN PostgreSQL usado quando --backend postgres.")
@@ -35,13 +41,13 @@ def main() -> int:
         help="Remove rodagens de versões que não rodam há N dias.",
     )
     purge.add_argument("--db", default=str(DEFAULT_DB), help="Caminho do banco SQLite.")
-    purge.add_argument("--env", default=str(DEFAULT_ENV), help="Arquivo .env para Supabase.")
+    purge.add_argument("--env", default=str(DEFAULT_ENV), help="Arquivo .env do backend.")
     purge.add_argument("--supabase-schema", default="public", help="Schema usado no Supabase.")
     purge.add_argument("--supabase-table-prefix", default="agent_tc_", help="Prefixo das tabelas no Supabase.")
     purge.add_argument("--postgres-dsn", help="DSN PostgreSQL usado quando --backend postgres.")
     purge.add_argument("--postgres-schema", default="public", help="Schema usado quando --backend postgres.")
     purge.add_argument("--postgres-table-prefix", default="agent_tc_", help="Prefixo das tabelas quando --backend postgres.")
-    purge.add_argument("--backend", choices=["sqlite", "supabase", "postgres"], default="supabase")
+    purge.add_argument("--backend", choices=["sqlite", "supabase", "postgres"], default=default_backend())
     purge.add_argument("--retention-days", type=int, default=30)
     purge.add_argument(
         "--apply",

@@ -1,3 +1,8 @@
+# Legado: API publica Render/Supabase
+
+Este documento foi preservado apenas como historico da fase Render/Supabase.
+O deploy atual recomendado para a SCI esta em `deploy/d01/DEPLOY_D01_DOCKER.md`.
+
 # API publica do Agent TC
 
 Objetivo:

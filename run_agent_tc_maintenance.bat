@@ -17,7 +17,7 @@ if exist "%ENV_FILE%" (
 )
 
 if not "%AGENT_TC_LOG_DIR%"=="" set "LOG_DIR=%AGENT_TC_LOG_DIR%"
-if "%AGENT_TC_BACKEND%"=="" set "AGENT_TC_BACKEND=supabase"
+if "%AGENT_TC_BACKEND%"=="" set "AGENT_TC_BACKEND=postgres"
 set "BACKEND=%AGENT_TC_BACKEND%"
 
 py -3 --version > nul 2>&1

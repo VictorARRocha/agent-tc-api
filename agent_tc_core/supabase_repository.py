@@ -11,7 +11,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from .api_repository import OFFICIAL_MODULES, SLUG_BY_MODULE_ID
+from .api_repository import OFFICIAL_MODULES, SLUG_BY_MODULE_ID, _node_sort_key
 from .constants import MODULE_CODES_BY_ID
 from .sqlite_repository import (
     MODULE_ID_BY_CODE,
@@ -554,7 +554,13 @@ class SupabaseRepository:
             if not module:
                 return []
             params["module_id"] = "eq." + module["id"]
-        rows = self._select_all("testcase_hierarchy", params)
+        rows = sorted(
+            self._select_all("testcase_hierarchy", params),
+            key=lambda row: (
+                _node_sort_key(str(row.get("module_code") or "")),
+                _node_sort_key(str(row.get("node_id") or "")),
+            ),
+        )
         return [hierarchy_api_row(row) for row in rows]
 
     def payload(self, run_id: str) -> dict[str, Any] | None:

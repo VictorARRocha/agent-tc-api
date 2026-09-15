@@ -47,7 +47,7 @@ if (-not (Test-Path -LiteralPath $EnvFile)) {
 
 $HostName = Get-ConfigValue "AGENT_TC_API_HOST" "0.0.0.0"
 $Port = Get-ConfigValue "AGENT_TC_API_PORT" "8000"
-$Backend = Get-ConfigValue "AGENT_TC_BACKEND" "supabase"
+$Backend = Get-ConfigValue "AGENT_TC_BACKEND" "postgres"
 
 $PythonArgs = @("-3")
 $UsePyLauncher = $true

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import re
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +26,7 @@ OFFICIAL_MODULES = [
 
 MODULE_BY_SLUG = {module["slug"]: module for module in OFFICIAL_MODULES}
 SLUG_BY_MODULE_ID = {module["id_modulo"]: module["slug"] for module in OFFICIAL_MODULES}
+DEFAULT_ENV = Path(__file__).resolve().parents[1] / ".env"
 
 
 def slugify(value: object) -> str:
@@ -115,6 +120,79 @@ class LocalPayloadRepository:
             "status": "solicitado_local",
             **request,
         }
+
+
+class RemoteApiRepository:
+    """Envia payload e evidencias da VM para a API central do Agent TC."""
+
+    def __init__(
+        self,
+        env_path: str | Path | None = None,
+        *,
+        api_url: str | None = None,
+        token: str | None = None,
+        dry_run: bool = False,
+    ):
+        env = _read_env(Path(env_path or DEFAULT_ENV))
+        self.api_url = (api_url or env.get("AGENT_TC_API_URL") or env.get("AGENT_TC_INGEST_API_URL") or "").rstrip("/")
+        self.token = token if token is not None else (env.get("AGENT_TC_API_TOKEN") or env.get("AGENT_TC_BRIDGE_TOKEN") or "")
+        self.dry_run = dry_run
+        if not self.api_url:
+            raise ValueError("AGENT_TC_API_URL nao configurado para --backend api")
+
+    def import_payload(self, payload: dict[str, Any], source: str = "payload") -> dict[str, Any]:
+        files = self._collect_evidence_files(payload)
+        body = {
+            "payload": payload,
+            "source": source,
+            "dry_run": self.dry_run,
+            "files": files,
+        }
+        return self._post_json("/ingest", body)
+
+    def _collect_evidence_files(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        files: list[dict[str, Any]] = []
+        for evidence in payload.get("evidencias") or []:
+            evidence_id = str(evidence.get("id_evidencia") or "")
+            local_path = Path(str(evidence.get("caminho_evidencia") or ""))
+            if not evidence_id or not local_path.is_file():
+                continue
+            content = local_path.read_bytes()
+            files.append(
+                {
+                    "id_evidencia": evidence_id,
+                    "nome_arquivo": evidence.get("nome_arquivo") or local_path.name,
+                    "caminho_origem": str(local_path),
+                    "mime_type": evidence.get("mime_type") or "application/octet-stream",
+                    "size_bytes": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "content_base64": base64.b64encode(content).decode("ascii"),
+                }
+            )
+        return files
+
+    def _post_json(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            self.api_url + path,
+            data=data,
+            method="POST",
+            headers={
+                "Content-Type": "application/json; charset=utf-8",
+                "Accept": "application/json",
+            },
+        )
+        if self.token:
+            request.add_header("Authorization", "Bearer " + self.token)
+        try:
+            with urllib.request.urlopen(request, timeout=300) as response:
+                response_body = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Agent TC API HTTP {exc.code}: {error_body[:2000]}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Falha ao conectar na Agent TC API em {self.api_url}: {exc}") from exc
+        return json.loads(response_body) if response_body.strip() else {}
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(current, ensure_ascii=False) + "\n")
         return current
@@ -179,3 +257,16 @@ def _now_stamp() -> str:
     from datetime import datetime
 
     return datetime.now().isoformat(timespec="microseconds")
+
+
+def _read_env(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values

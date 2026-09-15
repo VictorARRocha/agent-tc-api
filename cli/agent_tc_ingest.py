@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -9,10 +10,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from agent_tc_core.api_repository import RemoteApiRepository
 from agent_tc_core.pipeline import run_shadow_pipeline
 from agent_tc_core.postgres_repository import PostgresRepository
 from agent_tc_core.sqlite_repository import SQLiteRepository
 from agent_tc_core.supabase_repository import SupabaseHttpError, SupabaseRepository
+
+
+def default_backend() -> str:
+    return os.getenv("AGENT_TC_BACKEND") or "api"
 
 
 def main() -> int:
@@ -32,7 +38,7 @@ def main() -> int:
     parser.add_argument("--vm", help="Nome da VM. Se omitido, infere pelo caminho da rodagem.")
     parser.add_argument("--times-folder", help="Pasta opcional com arquivos Tempos *.txt.")
     parser.add_argument("--project-suite", help="Caminho opcional do ProjectSuite .pjs.")
-    parser.add_argument("--backend", choices=["supabase", "sqlite", "postgres"], default="supabase")
+    parser.add_argument("--backend", choices=["supabase", "sqlite", "postgres", "api"], default=default_backend())
     parser.add_argument("--env", default=str(PROJECT_ROOT / ".env"))
     parser.add_argument("--sqlite-db", default=str(PROJECT_ROOT / "data" / "agent_tc.sqlite"))
     parser.add_argument("--postgres-dsn", help="DSN PostgreSQL usado quando --backend postgres.")
@@ -52,6 +58,8 @@ def main() -> int:
         repository = SQLiteRepository(args.sqlite_db)
     elif args.backend == "postgres":
         repository = PostgresRepository(env_path=args.env, dsn=args.postgres_dsn, dry_run=args.dry_run)
+    elif args.backend == "api":
+        repository = RemoteApiRepository(env_path=args.env, dry_run=args.dry_run)
     else:
         repository = SupabaseRepository(env_path=args.env, dry_run=args.dry_run)
 

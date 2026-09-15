@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import json
 import mimetypes
 import os
+import re
 from datetime import date, datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,6 +27,7 @@ from .ai_grouping import (
 )
 from .api_repository import LocalPayloadRepository
 from .auth import AuthenticationError, SupabaseAuthValidator
+from .local_auth import LocalAuthError, LocalAuthService
 from .pipeline import run_shadow_pipeline
 from .storage import safe_storage_target
 
@@ -54,6 +59,8 @@ class AgentTcApi:
             return HTTPStatus.OK, self.index()
         if parts == ["health"]:
             return HTTPStatus.OK, {"ok": True, "service": "agent-tc-api"}
+        if len(parts) >= 2 and parts[0] == "auth":
+            return self._auth_get(parts[1:], authorization)
         if len(parts) == 3 and parts[0] == "bridge" and parts[1] == "rerun-requests":
             return self._bridge_get(parts[2], authorization)
         if parts == ["modules"]:
@@ -79,11 +86,15 @@ class AgentTcApi:
         return HTTPStatus.NOT_FOUND, {"error": "not_found", "path": path}
 
     def route_post(self, path: str, body: dict[str, Any], authorization: str | None = None) -> tuple[int, Any]:
+        parts = _path_parts(path)
+        if len(parts) >= 2 and parts[0] == "auth":
+            return self._auth_post(parts[1:], body, authorization)
         if self.read_only:
             return HTTPStatus.METHOD_NOT_ALLOWED, {"error": "read_only_api"}
-        parts = _path_parts(path)
         if parts == ["analyze"]:
             return self._analyze(body)
+        if parts == ["ingest"]:
+            return self._ingest(body, authorization)
         if len(parts) == 3 and parts[0] == "runs" and parts[2] == "ai-group":
             return self._ai_group(parts[1], body, authorization)
         if parts == ["rerun-requests"]:
@@ -108,6 +119,12 @@ class AgentTcApi:
             "logs_root": str(self.logs_root),
             "endpoints": [
                 "GET /health",
+                "POST /auth/register",
+                "POST /auth/login",
+                "POST /auth/logout",
+                "GET /auth/me",
+                "GET /auth/users",
+                "PATCH /auth/users/{id}",
                 "GET /modules",
                 "GET /modules/{slug}/runs",
                 "GET /runs",
@@ -133,9 +150,93 @@ class AgentTcApi:
                 "POST /bridge/rerun-requests/{id}/claim",
                 "POST /bridge/rerun-requests/{id}/update",
                 "POST /analyze",
+                "POST /ingest",
                 "POST /runs/{id}/ai-group",
             ],
         }
+
+    def route_patch(self, path: str, body: dict[str, Any], authorization: str | None = None) -> tuple[int, Any]:
+        parts = _path_parts(path)
+        if len(parts) >= 2 and parts[0] == "auth":
+            return self._auth_patch(parts[1:], body, authorization)
+        if self.read_only:
+            return HTTPStatus.METHOD_NOT_ALLOWED, {"error": "read_only_api"}
+        return HTTPStatus.NOT_FOUND, {"error": "not_found", "path": path}
+
+    def _auth_get(self, parts: list[str], authorization: str | None) -> tuple[int, Any]:
+        service = self._local_auth_service()
+        if not service:
+            return HTTPStatus.NOT_IMPLEMENTED, {"ok": False, "error": "local_auth_not_supported"}
+        try:
+            if parts == ["me"]:
+                return HTTPStatus.OK, service.current_user_response(authorization)
+            if parts == ["users"]:
+                return HTTPStatus.OK, {"ok": True, "users": service.list_users(authorization)}
+            return HTTPStatus.NOT_FOUND, {"ok": False, "error": "auth_endpoint_not_found"}
+        except LocalAuthError as exc:
+            return exc.status, {"ok": False, "error": exc.error, "message": str(exc)}
+        except AuthenticationError as exc:
+            return HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized", "message": str(exc)}
+
+    def _auth_post(self, parts: list[str], body: dict[str, Any], authorization: str | None) -> tuple[int, Any]:
+        service = self._local_auth_service()
+        if not service:
+            return HTTPStatus.NOT_IMPLEMENTED, {"ok": False, "error": "local_auth_not_supported"}
+        try:
+            if parts == ["register"]:
+                return HTTPStatus.CREATED, {"ok": True, "user": service.register(body)}
+            if parts == ["login"]:
+                return HTTPStatus.OK, {"ok": True, **service.login(str(body.get("username") or ""), str(body.get("password") or ""))}
+            if parts == ["logout"]:
+                return HTTPStatus.OK, service.logout(authorization)
+            return HTTPStatus.NOT_FOUND, {"ok": False, "error": "auth_endpoint_not_found"}
+        except LocalAuthError as exc:
+            return exc.status, {"ok": False, "error": exc.error, "message": str(exc)}
+        except AuthenticationError as exc:
+            return HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized", "message": str(exc)}
+
+    def _auth_patch(self, parts: list[str], body: dict[str, Any], authorization: str | None) -> tuple[int, Any]:
+        service = self._local_auth_service()
+        if not service:
+            return HTTPStatus.NOT_IMPLEMENTED, {"ok": False, "error": "local_auth_not_supported"}
+        try:
+            if len(parts) == 2 and parts[0] == "users":
+                return HTTPStatus.OK, {"ok": True, "user": service.update_user(parts[1], body, authorization)}
+            return HTTPStatus.NOT_FOUND, {"ok": False, "error": "auth_endpoint_not_found"}
+        except LocalAuthError as exc:
+            return exc.status, {"ok": False, "error": exc.error, "message": str(exc)}
+        except AuthenticationError as exc:
+            return HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized", "message": str(exc)}
+
+    def _local_auth_service(self) -> LocalAuthService | None:
+        required = (
+            "auth_user_count",
+            "auth_user_by_username",
+            "auth_user_by_id",
+            "auth_create_user",
+            "auth_update_user",
+            "auth_list_users",
+            "auth_create_session",
+            "auth_session_by_token_hash",
+            "auth_revoke_session",
+            "auth_log_admin_action",
+        )
+        if not all(hasattr(self.repository, name) for name in required):
+            return None
+        return LocalAuthService.from_env(self.repository, self.env_path)
+
+    def _validate_user_auth(self, authorization: str | None) -> dict[str, Any]:
+        if self.auth_validator:
+            return self.auth_validator.validate(authorization)
+        auth_backend = _env_value(self.env_path, "AGENT_TC_AUTH_BACKEND").strip().lower() or "local"
+        if auth_backend == "supabase":
+            return SupabaseAuthValidator.from_env(self.env_path).validate(authorization)
+        if auth_backend != "local":
+            raise AuthenticationError("AGENT_TC_AUTH_BACKEND invalido. Use local ou supabase.")
+        local_auth = self._local_auth_service()
+        if local_auth:
+            return local_auth.validate(authorization)
+        raise AuthenticationError("Auth local nao suportado pelo repository atual")
 
     def _bridge_get(self, child: str, authorization: str | None) -> tuple[int, Any]:
         auth_error = self._bridge_auth_error(authorization)
@@ -174,6 +275,15 @@ class AgentTcApi:
         expected = "Bearer " + token
         if authorization != expected:
             return HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized_bridge"}
+        return None
+
+    def _ingest_auth_error(self, authorization: str | None) -> tuple[int, Any] | None:
+        token = _env_value(self.env_path, "AGENT_TC_API_TOKEN") or _env_value(self.env_path, "AGENT_TC_BRIDGE_TOKEN")
+        if not token:
+            return None
+        expected = "Bearer " + token
+        if authorization != expected:
+            return HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized_ingest"}
         return None
 
     def _run_child(self, run_id: str, child: str) -> tuple[int, Any]:
@@ -242,6 +352,75 @@ class AgentTcApi:
             "testcase_hierarchy": len(payload.get("testcase_hierarchy") or []),
         }
 
+    def _ingest(self, body: dict[str, Any], authorization: str | None) -> tuple[int, Any]:
+        auth_error = self._ingest_auth_error(authorization)
+        if auth_error:
+            return auth_error
+        if not hasattr(self.repository, "import_payload"):
+            return HTTPStatus.NOT_IMPLEMENTED, {"ok": False, "error": "repository_does_not_support_import"}
+        payload = body.get("payload")
+        if not isinstance(payload, dict):
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "missing_payload"}
+        run_id = str((payload.get("rodagem") or {}).get("id_rodagem") or "").strip()
+        if not run_id:
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "missing_run_id"}
+        try:
+            staged = self._stage_ingest_files(payload, body.get("files") or [])
+            import_result = None
+            if body.get("dry_run"):
+                import_result = {"dry_run": True, "staged_files": staged}
+            else:
+                import_result = self.repository.import_payload(
+                    payload,
+                    source=str(body.get("source") or "api_ingest"),
+                )
+            return HTTPStatus.CREATED, {
+                "ok": True,
+                "run_id": run_id,
+                "staged_files": staged,
+                "import_result": import_result,
+                "falhas": len(payload.get("falhas") or []),
+                "evidencias": len(payload.get("evidencias") or []),
+                "diferencas": len(payload.get("diferencas_relatorio") or []),
+                "testcase_hierarchy": len(payload.get("testcase_hierarchy") or []),
+            }
+        except ValueError as exc:
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid_ingest_payload", "message": str(exc)}
+
+    def _stage_ingest_files(self, payload: dict[str, Any], files: list[Any]) -> int:
+        run_id = str((payload.get("rodagem") or {}).get("id_rodagem") or "run").strip()
+        by_id: dict[str, dict[str, Any]] = {}
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            evidence_id = str(item.get("id_evidencia") or "").strip()
+            if evidence_id:
+                by_id[evidence_id] = item
+
+        staged = 0
+        staging_root = self.logs_root / "api_ingest_files" / _safe_segment(run_id)
+        for evidence in payload.get("evidencias") or []:
+            evidence_id = str(evidence.get("id_evidencia") or "").strip()
+            item = by_id.get(evidence_id)
+            if not item:
+                continue
+            raw_content = item.get("content_base64") or ""
+            try:
+                content = base64.b64decode(raw_content, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise ValueError(f"Arquivo base64 invalido para evidencia {evidence_id}") from exc
+            expected_sha = str(item.get("sha256") or "").strip().lower()
+            actual_sha = hashlib.sha256(content).hexdigest()
+            if expected_sha and expected_sha != actual_sha:
+                raise ValueError(f"SHA256 divergente para evidencia {evidence_id}")
+            file_name = _safe_filename(str(item.get("nome_arquivo") or evidence.get("nome_arquivo") or evidence_id))
+            target = staging_root / _safe_segment(evidence_id) / file_name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+            evidence["caminho_evidencia"] = str(target)
+            staged += 1
+        return staged
+
     def _ai_group(self, run_id: str, body: dict[str, Any], authorization: str | None) -> tuple[int, Any]:
         dry_run = body.get("dry_run", True)
         if not self.repository.run(run_id):
@@ -265,8 +444,7 @@ class AgentTcApi:
             return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid_dry_run"}
         if self.require_ai_auth:
             try:
-                validator = self.auth_validator or SupabaseAuthValidator.from_env(self.env_path)
-                validator.validate(authorization)
+                self._validate_user_auth(authorization)
             except AuthenticationError as exc:
                 return HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized", "message": str(exc)}
         if not ai_input.get("falhas"):
@@ -389,6 +567,18 @@ class AgentTcRequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": type(exc).__name__, "message": str(exc)})
 
+    def do_PATCH(self) -> None:
+        try:
+            parsed = urlparse(self.path)
+            status, payload = self.api.route_patch(
+                parsed.path,
+                self._read_json_body(),
+                self.headers.get("Authorization"),
+            )
+            self._send(status, payload)
+        except Exception as exc:
+            self._send(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": type(exc).__name__, "message": str(exc)})
+
     def log_message(self, fmt: str, *args: object) -> None:
         print("%s - %s" % (self.address_string(), fmt % args))
 
@@ -405,7 +595,7 @@ class AgentTcRequestHandler(BaseHTTPRequestHandler):
             body = json.dumps(payload, ensure_ascii=False, indent=2, default=json_default).encode("utf-8")
         self.send_response(int(status))
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET,POST,PATCH,OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type,Authorization")
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -469,6 +659,16 @@ def _path_parts(path: str) -> list[str]:
     return [unquote(part) for part in path.strip("/").split("/") if part]
 
 
+def _safe_segment(value: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
+    return text.strip("._") or "item"
+
+
+def _safe_filename(value: str) -> str:
+    name = Path(value).name
+    return _safe_segment(name)
+
+
 def json_default(value: Any) -> str:
     if isinstance(value, datetime):
         return value.isoformat(timespec="seconds")
@@ -495,7 +695,7 @@ def _first(query: dict[str, list[str]], key: str) -> str | None:
 
 def _local_files_root(env_path: Path | None) -> Path | None:
     env = _read_env(env_path)
-    provider = (env.get("AGENT_TC_STORAGE") or env.get("STORAGE_PROVIDER") or "supabase").strip().lower()
+    provider = (env.get("AGENT_TC_STORAGE") or env.get("STORAGE_PROVIDER") or "local").strip().lower()
     if provider not in {"local", "file", "filesystem"}:
         return None
     root = env.get("AGENT_TC_STORAGE_ROOT") or env.get("LOCAL_STORAGE_ROOT")
@@ -522,6 +722,8 @@ def _read_env(path: Path | None) -> dict[str, str]:
         "STORAGE_PROVIDER",
         "LOCAL_STORAGE_ROOT",
         "AGENT_TC_BRIDGE_TOKEN",
+        "AGENT_TC_AUTH_SESSION_HOURS",
+        "AGENT_TC_AUTH_BACKEND",
     ):
         if os.getenv(key):
             values[key] = os.environ[key]

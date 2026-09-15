@@ -12,9 +12,9 @@ COPY README.md ./
 
 ENV HOST=0.0.0.0
 ENV PORT=8000
-ENV AGENT_TC_BACKEND=supabase
+ENV AGENT_TC_BACKEND=postgres
 ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "python cli/agent_tc_api.py --backend ${AGENT_TC_BACKEND:-supabase} --host ${HOST} --port ${PORT}"]
+CMD ["sh", "-c", "python cli/agent_tc_api.py --backend ${AGENT_TC_BACKEND:-postgres} --host ${HOST} --port ${PORT}"]

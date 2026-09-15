@@ -1,0 +1,54 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: agent-tc-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-agent_tc}
+      POSTGRES_USER: ${POSTGRES_USER:-agent_tc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD no docker.env}
+    volumes:
+      - agent-tc-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agent_tc} -d ${POSTGRES_DB:-agent_tc}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: agent-tc-api:local
+    container_name: agent-tc-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - docker.env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8000
+      AGENT_TC_BACKEND: postgres
+      POSTGRES_DSN: postgresql://${POSTGRES_USER:-agent_tc}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-agent_tc}
+      POSTGRES_SCHEMA: ${POSTGRES_SCHEMA:-public}
+      POSTGRES_TABLE_PREFIX: ${POSTGRES_TABLE_PREFIX:-agent_tc_}
+      AGENT_TC_STORAGE: local
+      AGENT_TC_STORAGE_ROOT: /data/evidencias
+      AGENT_TC_PUBLIC_BASE_URL: ${AGENT_TC_PUBLIC_BASE_URL:-http://localhost:8000/files}
+      AGENT_TC_AUTH_BACKEND: local
+    ports:
+      - "${AGENT_TC_API_PORT:-8000}:8000"
+    volumes:
+      - agent-tc-evidencias:/data/evidencias
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  agent-tc-postgres-data:
+  agent-tc-evidencias:

@@ -46,7 +46,7 @@ def optional_env(name, default=None):
 
 
 def load_config():
-    bridge_backend = optional_env("JENKINS_BRIDGE_BACKEND", optional_env("AGENT_TC_BRIDGE_BACKEND", "supabase")).strip().lower()
+    bridge_backend = optional_env("JENKINS_BRIDGE_BACKEND", optional_env("AGENT_TC_BRIDGE_BACKEND", "api")).strip().lower()
     config = {
         "bridge_backend": bridge_backend,
         "agent_tc_api_url": optional_env("AGENT_TC_API_URL", "http://127.0.0.1:8000").rstrip("/"),

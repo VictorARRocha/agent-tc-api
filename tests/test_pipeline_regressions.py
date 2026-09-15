@@ -16,6 +16,7 @@ from agent_tc_core.pipeline import (
     read_occurrence_totals_from_project_suite,
     read_occurrence_totals_from_run_folder,
 )
+from agent_tc_core.postgres_repository import PostgresRepository
 from agent_tc_core.project_suite import ProjectSuiteVariables
 from agent_tc_core.sqlite_repository import SQLiteRepository
 from agent_tc_core.supabase_repository import SupabaseRepository, _deduplicate_rows
@@ -31,6 +32,21 @@ class PipelineRegressionTests(unittest.TestCase):
         )
         self.assertEqual("a08", context.vm_name)
         self.assertTrue(context.id_rodagem.startswith("rod_a08_"))
+
+    def test_postgres_schema_includes_local_auth_tables(self):
+        repo = PostgresRepository.__new__(PostgresRepository)
+        repo.schema = "private"
+        repo.table_prefix = "qa_"
+
+        sql = repo._schema_sql()
+
+        self.assertIn('"private"."qa_app_users"', sql)
+        self.assertIn('"private"."qa_auth_sessions"', sql)
+        self.assertIn('"private"."qa_permission_catalog"', sql)
+        self.assertIn('"private"."qa_user_permissions"', sql)
+        self.assertIn('"private"."qa_user_module_permissions"', sql)
+        self.assertIn('"private"."qa_admin_audit_log"', sql)
+        self.assertIn("'004_local_auth'", sql)
 
     def test_supabase_hierarchy_fetches_all_pages(self):
         class FakeSupabaseRepository(SupabaseRepository):

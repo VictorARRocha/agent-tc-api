@@ -1,3 +1,9 @@
+# Legado: documentacao completa da fase de migracao
+
+Este documento foi preservado como historico tecnico. Ele descreve partes do
+estado antigo, incluindo Supabase como padrao, e nao deve ser usado como guia de
+deploy atual. O deploy atual da D01 esta em `deploy/d01/DEPLOY_D01_DOCKER.md`.
+
 # Documentacao completa do Agent TC
 
 Data desta revisao: 2026-09-03
