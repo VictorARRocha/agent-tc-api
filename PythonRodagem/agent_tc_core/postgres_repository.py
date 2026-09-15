@@ -6,14 +6,13 @@ from pathlib import Path
 from typing import Any
 
 from .storage import DEFAULT_BUCKET, storage_from_env
-from .supabase_repository import (
+from .canonical_repository import (
+    CanonicalRepository,
     DEFAULT_ENV,
     DEFAULT_SCHEMA,
     DEFAULT_TABLE_PREFIX,
-    SupabaseRepository,
     _deduplicate_rows,
     chunks,
-    parse_bool,
     read_env,
 )
 
@@ -23,8 +22,10 @@ POSTGRES_MIGRATIONS = ROOT / "database" / "postgres"
 POSTGRES_SCHEMA = POSTGRES_MIGRATIONS / "001_initial.sql"
 
 
-class PostgresRepository(SupabaseRepository):
-    """Postgres local usando o mesmo contrato de dados do SupabaseRepository."""
+class PostgresRepository(CanonicalRepository):
+    """Postgres local usando o contrato canônico de dados do Agent TC."""
+
+    backend_name = "postgres"
 
     def __init__(
         self,
@@ -39,16 +40,12 @@ class PostgresRepository(SupabaseRepository):
         env = read_env(env_path or DEFAULT_ENV)
         self.env_path = Path(env_path or DEFAULT_ENV)
         self.dsn = dsn or env.get("POSTGRES_DSN") or env.get("DATABASE_URL") or ""
-        self.schema = schema or env.get("POSTGRES_SCHEMA") or env.get("SUPABASE_SCHEMA") or DEFAULT_SCHEMA
-        self.table_prefix = table_prefix if table_prefix is not None else env.get("POSTGRES_TABLE_PREFIX", env.get("SUPABASE_TABLE_PREFIX", DEFAULT_TABLE_PREFIX))
-        self.storage_public = parse_bool(env.get("SUPABASE_BUCKET_PUBLIC"), default=True)
+        self.schema = schema or env.get("POSTGRES_SCHEMA") or DEFAULT_SCHEMA
+        self.table_prefix = table_prefix if table_prefix is not None else env.get("POSTGRES_TABLE_PREFIX", DEFAULT_TABLE_PREFIX)
         self.dry_run = dry_run
         self.storage = storage_from_env(
             env,
-            supabase_url=(env.get("SUPABASE_URL") or "").rstrip("/"),
-            supabase_service_key=env.get("SUPABASE_SERVICE_ROLE_KEY") or env.get("SUPABASE_SECRET_KEY") or "",
-            default_bucket=bucket or env.get("AGENT_TC_STORAGE_BUCKET") or env.get("SUPABASE_BUCKET") or DEFAULT_BUCKET,
-            storage_public=self.storage_public,
+            default_bucket=bucket or env.get("AGENT_TC_STORAGE_BUCKET") or DEFAULT_BUCKET,
             dry_run=dry_run,
             default_provider="local",
         )

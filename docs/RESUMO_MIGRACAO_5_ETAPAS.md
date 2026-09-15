@@ -2,7 +2,7 @@
 
 Atualizado em: 2026-09-15
 
-Objetivo: deixar o Agent TC operando com API + PostgreSQL + storage local da empresa, mantendo Supabase apenas como adapter legado/rollback.
+Objetivo: deixar o Agent TC operando com API + PostgreSQL + storage local da empresa, sem dependência do provedor externo antigo.
 
 ## Estado geral
 
@@ -10,7 +10,7 @@ Objetivo: deixar o Agent TC operando com API + PostgreSQL + storage local da emp
 - Etapa 2: StorageAdapter - implementada.
 - Etapa 3: PostgresRepository local - implementada e validada.
 - Etapa 4: JenkinsBridge via API - implementada e validada.
-- Etapa 5: Auth/login sair do Supabase - implementada com Auth local no PostgreSQL.
+- Etapa 5: Auth/login local - implementada com Auth local no PostgreSQL.
 
 ## Arquitetura atual recomendada
 
@@ -23,7 +23,7 @@ Dashboard -> API D01
 JenkinsBridge D01 -> API D01 -> Jenkins
 ```
 
-O dashboard nao fala direto com PostgreSQL, storage local, Jenkins ou Supabase.
+O dashboard nao fala direto com PostgreSQL, storage local ou Jenkins.
 
 ## Configuracao principal
 
@@ -62,15 +62,13 @@ VITE_DATA_PROVIDER=api
 VITE_AGENT_TC_API_URL=http://IP_DA_D01:8000
 ```
 
-## O que ainda existe de Supabase
+## Dependencias atuais
 
-- `PythonRodagem/agent_tc_core/supabase_repository.py`: adapter legado para rollback.
-- `PythonRodagem/agent_tc_core/storage.py`: `SupabaseStorageAdapter` legado para rollback.
-- `JenkinsBridge/jenkins_bridge.py`: modo `JENKINS_BRIDGE_BACKEND=supabase` legado.
-- `PythonRodagem/cli/agent_tc_db.py`: comandos antigos de utilidade Supabase.
-- `docs/legacy/`: documentos historicos.
-
-Esses pontos nao sao o caminho padrao atual. Para voltar temporariamente ao Supabase, a troca precisa ser explicita por `.env`/argumento.
+- API: Python + PostgreSQL.
+- Storage de evidencias: volume/local file storage servido pela API em `/files/...`.
+- Auth: tabelas locais no PostgreSQL.
+- JenkinsBridge: somente via API.
+- Dashboard: somente via API.
 
 ## Onde procurar se quebrar
 

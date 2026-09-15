@@ -12,15 +12,12 @@ if str(PROJECT_ROOT) not in sys.path:
 from agent_tc_core.api_server import make_server
 from agent_tc_core.postgres_repository import PostgresRepository
 from agent_tc_core.sqlite_repository import SQLiteRepository
-from agent_tc_core.supabase_repository import SupabaseRepository
 
 
 def default_backend() -> str:
     configured = os.getenv("AGENT_TC_BACKEND")
     if configured:
         return configured
-    if os.getenv("SUPABASE_URL"):
-        return "supabase"
     return "local-json"
 
 
@@ -35,7 +32,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--backend",
-        choices=["local-json", "sqlite", "supabase", "postgres"],
+        choices=["local-json", "sqlite", "postgres"],
         default=default_backend(),
         help="Fonte de dados da API.",
     )
@@ -47,21 +44,11 @@ def main() -> int:
     parser.add_argument(
         "--env",
         default=str(PROJECT_ROOT / ".env"),
-        help="Arquivo .env usado por supabase/postgres.",
+        help="Arquivo .env usado pelo backend configurado.",
     )
     parser.add_argument("--postgres-dsn", help="DSN PostgreSQL usado quando --backend postgres.")
     parser.add_argument("--postgres-schema", default="public", help="Schema usado quando --backend postgres.")
     parser.add_argument("--postgres-table-prefix", default="agent_tc_", help="Prefixo das tabelas quando --backend postgres.")
-    parser.add_argument(
-        "--supabase-schema",
-        default="public",
-        help="Schema PostgREST usado quando --backend supabase.",
-    )
-    parser.add_argument(
-        "--supabase-table-prefix",
-        default="agent_tc_",
-        help="Prefixo das tabelas canonicas no Supabase.",
-    )
     parser.add_argument(
         "--read-only",
         action="store_true",
@@ -72,13 +59,6 @@ def main() -> int:
     repository = None
     if args.backend == "sqlite":
         repository = SQLiteRepository(args.sqlite_db)
-        repository.initialize()
-    elif args.backend == "supabase":
-        repository = SupabaseRepository(
-            env_path=args.env,
-            schema=args.supabase_schema,
-            table_prefix=args.supabase_table_prefix,
-        )
         repository.initialize()
     elif args.backend == "postgres":
         repository = PostgresRepository(
@@ -102,10 +82,6 @@ def main() -> int:
     print(f"read_only={args.read_only}")
     if args.backend == "sqlite":
         print(f"sqlite_db={args.sqlite_db}")
-    if args.backend == "supabase":
-        print(f"supabase_schema={args.supabase_schema}")
-        print(f"supabase_table_prefix={args.supabase_table_prefix}")
-        print(f"env={args.env}")
     if args.backend == "postgres":
         print(f"postgres_schema={args.postgres_schema}")
         print(f"postgres_table_prefix={args.postgres_table_prefix}")

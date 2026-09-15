@@ -1,9 +1,7 @@
 # Modelo Canonico Agent TC
 
-Este documento define o modelo de dados ideal do Agent TC, independente de
-Supabase. A Supabase deve ser apenas um adapter. O mesmo contrato deve poder
-ser implementado em Postgres puro, SQLite, outro banco relacional ou API
-intermediaria.
+Este documento define o modelo de dados do Agent TC para Postgres puro,
+SQLite de teste, outro banco relacional ou API intermediaria.
 
 ## Principios
 
@@ -138,7 +136,7 @@ Campos:
 - `file_type`: texto.
 - `original_name`: texto.
 - `local_path`: texto nullable.
-- `storage_provider`: texto. Ex.: `supabase`, `s3`, `local`.
+- `storage_provider`: texto. Ex.: `local`, `s3`, `external`.
 - `storage_bucket`: texto nullable.
 - `storage_path`: texto nullable.
 - `public_url`: texto nullable.
@@ -315,9 +313,9 @@ Mapeamento inicial:
 1. Revisar nomes das tabelas e campos.
 2. Criar `database/postgres/001_initial.sql`.
 3. Criar `database/sqlite/001_initial.sql` para testes locais.
-4. Criar `docs/SCHEMA_MAPPING_SUPABASE.md`.
+4. Manter este documento alinhado com as migrations de Postgres.
 5. Criar adapters Python:
    - `LocalJsonRepository`
-   - `SupabaseRepository`
+   - `CanonicalRepository`
    - `PostgresRepository`
    - `SQLiteRepository`

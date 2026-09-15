@@ -7,9 +7,6 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 
 from .api_repository import OFFICIAL_MODULES, SLUG_BY_MODULE_ID, _node_sort_key
 from .constants import MODULE_CODES_BY_ID
@@ -44,42 +41,28 @@ DEFAULT_SCHEMA = "public"
 DEFAULT_TABLE_PREFIX = "agent_tc_"
 
 
-class SupabaseHttpError(RuntimeError):
-    def __init__(self, method: str, url: str, status: int, body: str):
-        self.method = method
-        self.url = url
-        self.status = status
-        self.body = body
-        super().__init__(f"{method} {url} -> HTTP {status}: {body[:500]}")
+class CanonicalRepository:
+    backend_name = "canonical"
 
-
-class SupabaseRepository:
     def __init__(
         self,
         env_path: str | Path | None = None,
         *,
-        url: str | None = None,
-        service_key: str | None = None,
         bucket: str | None = None,
         schema: str | None = None,
         table_prefix: str | None = None,
         dry_run: bool = False,
     ):
         env = read_env(env_path or DEFAULT_ENV)
-        self.url = (url or env.get("SUPABASE_URL") or "").rstrip("/")
-        self.service_key = service_key or env.get("SUPABASE_SERVICE_ROLE_KEY") or env.get("SUPABASE_SECRET_KEY") or ""
-        self.bucket = bucket or env.get("SUPABASE_BUCKET") or DEFAULT_BUCKET
-        self.schema = schema or env.get("SUPABASE_SCHEMA") or DEFAULT_SCHEMA
-        self.table_prefix = table_prefix if table_prefix is not None else env.get("SUPABASE_TABLE_PREFIX", DEFAULT_TABLE_PREFIX)
-        self.storage_public = parse_bool(env.get("SUPABASE_BUCKET_PUBLIC"), default=True)
+        self.bucket = bucket or env.get("AGENT_TC_STORAGE_BUCKET") or DEFAULT_BUCKET
+        self.schema = schema or env.get("POSTGRES_SCHEMA") or DEFAULT_SCHEMA
+        self.table_prefix = table_prefix if table_prefix is not None else env.get("POSTGRES_TABLE_PREFIX", DEFAULT_TABLE_PREFIX)
         self.dry_run = dry_run
         self.storage = storage_from_env(
             env,
-            supabase_url=self.url,
-            supabase_service_key=self.service_key,
             default_bucket=self.bucket,
-            storage_public=self.storage_public,
             dry_run=dry_run,
+            default_provider="local",
         )
         self.bucket = self.storage.bucket
         self.plan: dict[str, Any] = {
@@ -94,11 +77,6 @@ class SupabaseRepository:
             "upload_errors": [],
             "deduplicated_rows": {},
         }
-        if not self.url:
-            raise ValueError("SUPABASE_URL nao configurada")
-        if not self.service_key:
-            raise ValueError("SUPABASE_SERVICE_ROLE_KEY nao configurada")
-
     def initialize(self) -> None:
         if self.dry_run:
             self.plan["initialize"] = "skipped_dry_run"
@@ -228,9 +206,9 @@ class SupabaseRepository:
             raise
 
         return {
-            "backend": "supabase",
-                "schema": self.schema,
-                "table_prefix": self.table_prefix,
+            "backend": self.backend_name,
+            "schema": self.schema,
+            "table_prefix": self.table_prefix,
             "bucket": self.bucket,
             "dry_run": self.dry_run,
             "run_id": run_id,
@@ -256,7 +234,7 @@ class SupabaseRepository:
         cutoff = now - timedelta(days=retention_days)
         cutoff_iso = cutoff.isoformat(timespec="seconds")
         result: dict[str, Any] = {
-            "backend": "supabase",
+            "backend": self.backend_name,
             "schema": self.schema,
             "table_prefix": self.table_prefix,
             "bucket": self.bucket,
@@ -568,7 +546,7 @@ class SupabaseRepository:
         if not run:
             return None
         return {
-            "modo": "supabase",
+            "modo": self.backend_name,
             "rodagem": run,
             "falhas": self.failures(run_id),
             "evidencias": self.evidences(run_id),
@@ -1043,52 +1021,7 @@ class SupabaseRepository:
         query: dict[str, str] | None = None,
         extra_headers: dict[str, str] | None = None,
     ) -> Any:
-        headers = {
-            "Accept": "application/json",
-            "apikey": self.service_key,
-            "Authorization": "Bearer " + self.service_key,
-            "Accept-Profile": self.schema,
-            "Content-Profile": self.schema,
-        }
-        if body is not None:
-            headers["Content-Type"] = "application/json"
-        if extra_headers:
-            headers.update(extra_headers)
-        data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
-        return self._request_json(method, self.url + "/rest/v1" + path, headers, data, query)
-
-    def _request_json(
-        self,
-        method: str,
-        url: str,
-        headers: dict[str, str],
-        data: bytes | None,
-        query: dict[str, str] | None,
-    ) -> Any:
-        response = self._request_bytes(method, url, headers, data, query)
-        if not response:
-            return None
-        return json.loads(response.decode("utf-8"))
-
-    def _request_bytes(
-        self,
-        method: str,
-        url: str,
-        headers: dict[str, str],
-        data: bytes | None,
-        query: dict[str, str] | None,
-    ) -> bytes:
-        if query:
-            url += "?" + urlencode(query)
-        req = Request(url, data=data, headers=headers, method=method)
-        try:
-            with urlopen(req, timeout=60) as response:
-                return response.read()
-        except HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise SupabaseHttpError(method, url, exc.code, body) from exc
-        except URLError as exc:
-            raise RuntimeError(f"{method} {url} -> {exc}") from exc
+        raise NotImplementedError(f"{method} {path} nao implementado em {self.__class__.__name__}")
 
 
 def read_env(path: str | Path) -> dict[str, str]:
@@ -1102,13 +1035,6 @@ def read_env(path: str | Path) -> dict[str, str]:
             key, value = line.split("=", 1)
             values[key.strip()] = value.strip().strip('"').strip("'")
     for key in (
-        "SUPABASE_URL",
-        "SUPABASE_SERVICE_ROLE_KEY",
-        "SUPABASE_SECRET_KEY",
-        "SUPABASE_BUCKET",
-        "SUPABASE_BUCKET_PUBLIC",
-        "SUPABASE_SCHEMA",
-        "SUPABASE_TABLE_PREFIX",
         "AGENT_TC_STORAGE",
         "AGENT_TC_STORAGE_BUCKET",
         "AGENT_TC_STORAGE_ROOT",

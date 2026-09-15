@@ -19,7 +19,7 @@ from agent_tc_core.pipeline import (
 from agent_tc_core.postgres_repository import PostgresRepository
 from agent_tc_core.project_suite import ProjectSuiteVariables
 from agent_tc_core.sqlite_repository import SQLiteRepository
-from agent_tc_core.supabase_repository import SupabaseRepository, _deduplicate_rows
+from agent_tc_core.canonical_repository import CanonicalRepository, _deduplicate_rows
 
 
 class PipelineRegressionTests(unittest.TestCase):
@@ -48,8 +48,8 @@ class PipelineRegressionTests(unittest.TestCase):
         self.assertIn('"private"."qa_admin_audit_log"', sql)
         self.assertIn("'004_local_auth'", sql)
 
-    def test_supabase_hierarchy_fetches_all_pages(self):
-        class FakeSupabaseRepository(SupabaseRepository):
+    def test_canonical_hierarchy_fetches_all_pages(self):
+        class FakeCanonicalRepository(CanonicalRepository):
             def __init__(self, rows):
                 self.rows = rows
                 self.offsets = []
@@ -94,7 +94,7 @@ class PipelineRegressionTests(unittest.TestCase):
 
         rows = [hierarchy_row(f"2.{index}") for index in range(10, 1010)]
         rows.extend([hierarchy_row("2.7"), hierarchy_row("2.9")])
-        repo = FakeSupabaseRepository(rows)
+        repo = FakeCanonicalRepository(rows)
 
         result = repo.testcase_hierarchy("fiscal")
         node_ids = [row["node_id"] for row in result]
@@ -178,7 +178,7 @@ class PipelineRegressionTests(unittest.TestCase):
         second = failure_id(context, "3.1.8.1.5.6", "3.1.8.1.5.6-10_07_2026-23_58_27.RAR", 2)
         self.assertNotEqual(first, second)
 
-    def test_supabase_batch_rows_are_deduplicated_by_conflict_key(self):
+    def test_canonical_batch_rows_are_deduplicated_by_conflict_key(self):
         rows = [{"id": "a", "value": 1}, {"id": "a", "value": 2}, {"id": "b", "value": 3}]
         result = _deduplicate_rows(rows, "id")
         self.assertEqual(2, len(result))

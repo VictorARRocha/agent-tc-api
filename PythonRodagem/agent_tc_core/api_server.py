@@ -26,7 +26,7 @@ from .ai_grouping import (
     write_ai_dry_run,
 )
 from .api_repository import LocalPayloadRepository
-from .auth import AuthenticationError, SupabaseAuthValidator
+from .auth import AuthenticationError
 from .local_auth import LocalAuthError, LocalAuthService
 from .pipeline import run_shadow_pipeline
 from .storage import safe_storage_target
@@ -229,10 +229,8 @@ class AgentTcApi:
         if self.auth_validator:
             return self.auth_validator.validate(authorization)
         auth_backend = _env_value(self.env_path, "AGENT_TC_AUTH_BACKEND").strip().lower() or "local"
-        if auth_backend == "supabase":
-            return SupabaseAuthValidator.from_env(self.env_path).validate(authorization)
         if auth_backend != "local":
-            raise AuthenticationError("AGENT_TC_AUTH_BACKEND invalido. Use local ou supabase.")
+            raise AuthenticationError("AGENT_TC_AUTH_BACKEND invalido. Use local.")
         local_auth = self._local_auth_service()
         if local_auth:
             return local_auth.validate(authorization)
@@ -679,8 +677,6 @@ def json_default(value: Any) -> str:
 
 def _repository_mode(repository: Any) -> str:
     name = repository.__class__.__name__
-    if name == "SupabaseRepository":
-        return "supabase"
     if name == "PostgresRepository":
         return "postgres"
     if name == "SQLiteRepository":

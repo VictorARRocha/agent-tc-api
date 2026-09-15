@@ -10,21 +10,6 @@ from dotenv import dotenv_values
 POLL_INTERVAL_SECONDS = 10
 ENV_VALUES = dotenv_values(".env")
 
-ACTIVE_STATUSES = [
-    "enviado_jenkins",
-    "na_fila",
-    "rodando",
-    "processando",
-    "erro_monitoramento",
-    "cancelando",
-]
-
-CANCEL_REQUEST_STATUSES = [
-    "cancel_requested",
-    "cancelamento_solicitado",
-]
-
-
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
@@ -47,6 +32,8 @@ def optional_env(name, default=None):
 
 def load_config():
     bridge_backend = optional_env("JENKINS_BRIDGE_BACKEND", optional_env("AGENT_TC_BRIDGE_BACKEND", "api")).strip().lower()
+    if bridge_backend != "api":
+        raise RuntimeError("JENKINS_BRIDGE_BACKEND invalido. Use 'api'.")
     config = {
         "bridge_backend": bridge_backend,
         "agent_tc_api_url": optional_env("AGENT_TC_API_URL", "http://127.0.0.1:8000").rstrip("/"),
@@ -56,21 +43,7 @@ def load_config():
         "jenkins_user": required_env("JENKINS_USER"),
         "jenkins_api_token": required_env("JENKINS_API_TOKEN"),
     }
-    if bridge_backend == "supabase":
-        config["supabase_url"] = required_env("SUPABASE_URL").rstrip("/")
-        config["supabase_key"] = required_env("SUPABASE_SERVICE_ROLE_KEY")
-    elif bridge_backend != "api":
-        raise RuntimeError("JENKINS_BRIDGE_BACKEND invalido. Use 'api' ou 'supabase'.")
     return config
-
-
-def supabase_headers(config):
-    return {
-        "apikey": config["supabase_key"],
-        "Authorization": "Bearer " + config["supabase_key"],
-        "Content-Type": "application/json",
-        "Prefer": "return=representation",
-    }
 
 
 def api_headers(config):
@@ -85,11 +58,6 @@ def api_url(config, path):
     if not path.startswith("/"):
         path = "/" + path
     return config["agent_tc_api_url"] + path
-
-
-def table_url(config):
-    table = ENV_VALUES.get("SUPABASE_RERUN_TABLE") or "agent_tc_rerun_requests"
-    return config["supabase_url"] + "/rest/v1/" + table
 
 
 def jenkins_auth(config):
@@ -121,50 +89,22 @@ def extract_queue_id(queue_url):
 
 
 def update_request(config, request_id, fields):
-    if config["bridge_backend"] == "api":
-        response = requests.post(
-            api_url(config, "/bridge/rerun-requests/" + str(request_id) + "/update"),
-            headers=api_headers(config),
-            data=json.dumps(fields, separators=(",", ":"), ensure_ascii=False),
-            timeout=30,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        row = payload.get("rerun_request")
-        return [row] if row else []
-
-    body = dict(fields)
-    body["updated_at"] = now_iso()
-
-    response = requests.patch(
-        table_url(config),
-        headers=supabase_headers(config),
-        params={"id": "eq." + str(request_id)},
-        data=json.dumps(body, separators=(",", ":"), ensure_ascii=False),
+    response = requests.post(
+        api_url(config, "/bridge/rerun-requests/" + str(request_id) + "/update"),
+        headers=api_headers(config),
+        data=json.dumps(fields, separators=(",", ":"), ensure_ascii=False),
         timeout=30,
     )
     response.raise_for_status()
-    return response.json()
+    payload = response.json()
+    row = payload.get("rerun_request")
+    return [row] if row else []
 
 
 def fetch_requested(config):
-    if config["bridge_backend"] == "api":
-        response = requests.get(
-            api_url(config, "/bridge/rerun-requests/requested"),
-            headers=api_headers(config),
-            timeout=30,
-        )
-        response.raise_for_status()
-        return response.json()
-
     response = requests.get(
-        table_url(config),
-        headers=supabase_headers(config),
-        params={
-            "status": "in.(requested,solicitado)",
-            "select": "*",
-            "order": "created_at.asc",
-        },
+        api_url(config, "/bridge/rerun-requests/requested"),
+        headers=api_headers(config),
         timeout=30,
     )
     response.raise_for_status()
@@ -172,24 +112,9 @@ def fetch_requested(config):
 
 
 def fetch_active_requests(config):
-    if config["bridge_backend"] == "api":
-        response = requests.get(
-            api_url(config, "/bridge/rerun-requests/active"),
-            headers=api_headers(config),
-            timeout=30,
-        )
-        response.raise_for_status()
-        return response.json()
-
     response = requests.get(
-        table_url(config),
-        headers=supabase_headers(config),
-        params={
-            "execution_status": "in.(" + ",".join(ACTIVE_STATUSES) + ")",
-            "select": "*",
-            "order": "created_at.desc",
-            "limit": "50",
-        },
+        api_url(config, "/bridge/rerun-requests/active"),
+        headers=api_headers(config),
         timeout=30,
     )
     response.raise_for_status()
@@ -197,23 +122,9 @@ def fetch_active_requests(config):
 
 
 def fetch_cancel_requested(config):
-    if config["bridge_backend"] == "api":
-        response = requests.get(
-            api_url(config, "/bridge/rerun-requests/cancel-requested"),
-            headers=api_headers(config),
-            timeout=30,
-        )
-        response.raise_for_status()
-        return response.json()
-
     response = requests.get(
-        table_url(config),
-        headers=supabase_headers(config),
-        params={
-            "status": "in.(" + ",".join(CANCEL_REQUEST_STATUSES) + ")",
-            "select": "*",
-            "order": "updated_at.asc",
-        },
+        api_url(config, "/bridge/rerun-requests/cancel-requested"),
+        headers=api_headers(config),
         timeout=30,
     )
     response.raise_for_status()
@@ -223,36 +134,14 @@ def fetch_cancel_requested(config):
 def claim_request(config, record):
     request_id = record["id"]
 
-    if config["bridge_backend"] == "api":
-        response = requests.post(
-            api_url(config, "/bridge/rerun-requests/" + str(request_id) + "/claim"),
-            headers=api_headers(config),
-            data=b"{}",
-            timeout=30,
-        )
-        response.raise_for_status()
-        return bool(response.json().get("claimed"))
-
-    body = {
-        "status": "processando",
-        "execution_status": "processando",
-        "updated_at": now_iso(),
-    }
-
-    response = requests.patch(
-        table_url(config),
-        headers=supabase_headers(config),
-        params={
-            "id": "eq." + str(request_id),
-            "status": "in.(requested,solicitado)",
-        },
-        data=json.dumps(body, separators=(",", ":"), ensure_ascii=False),
+    response = requests.post(
+        api_url(config, "/bridge/rerun-requests/" + str(request_id) + "/claim"),
+        headers=api_headers(config),
+        data=b"{}",
         timeout=30,
     )
     response.raise_for_status()
-
-    claimed = response.json()
-    return len(claimed) > 0
+    return bool(response.json().get("claimed"))
 
 
 def compact_config_json(record):

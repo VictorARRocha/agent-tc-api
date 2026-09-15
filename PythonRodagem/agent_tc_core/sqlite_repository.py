@@ -775,7 +775,7 @@ class SQLiteRepository:
             local_path = source.get("caminho_evidencia") or ""
             sha = sha256_file(local_path)
             upload_status = "uploaded" if source.get("public_url") or source.get("signed_url") else "pending"
-            provider = "supabase" if source.get("bucket") else "local"
+            provider = "external" if source.get("bucket") else "local"
             row = {
                 "id": source["id_evidencia"],
                 "run_id": run_id,

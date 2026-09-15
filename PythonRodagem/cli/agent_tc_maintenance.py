@@ -13,7 +13,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from agent_tc_core.postgres_repository import PostgresRepository
 from agent_tc_core.sqlite_repository import SQLiteRepository
-from agent_tc_core.supabase_repository import SupabaseHttpError, SupabaseRepository
 
 
 DEFAULT_DB = PROJECT_ROOT / "data" / "agent_tc.sqlite"
@@ -22,15 +21,13 @@ DEFAULT_ENV = PROJECT_ROOT / ".env"
 
 def default_backend() -> str:
     backend = os.getenv("AGENT_TC_BACKEND") or "postgres"
-    return backend if backend in {"sqlite", "supabase", "postgres"} else "postgres"
+    return backend if backend in {"sqlite", "postgres"} else "postgres"
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Agent TC maintenance routines")
     parser.add_argument("--db", default=str(DEFAULT_DB), help="Caminho do banco SQLite.")
     parser.add_argument("--env", default=str(DEFAULT_ENV), help="Arquivo .env do backend.")
-    parser.add_argument("--supabase-schema", default="public", help="Schema usado no Supabase.")
-    parser.add_argument("--supabase-table-prefix", default="agent_tc_", help="Prefixo das tabelas no Supabase.")
     parser.add_argument("--postgres-dsn", help="DSN PostgreSQL usado quando --backend postgres.")
     parser.add_argument("--postgres-schema", default="public", help="Schema usado quando --backend postgres.")
     parser.add_argument("--postgres-table-prefix", default="agent_tc_", help="Prefixo das tabelas quando --backend postgres.")
@@ -42,12 +39,10 @@ def main() -> int:
     )
     purge.add_argument("--db", default=str(DEFAULT_DB), help="Caminho do banco SQLite.")
     purge.add_argument("--env", default=str(DEFAULT_ENV), help="Arquivo .env do backend.")
-    purge.add_argument("--supabase-schema", default="public", help="Schema usado no Supabase.")
-    purge.add_argument("--supabase-table-prefix", default="agent_tc_", help="Prefixo das tabelas no Supabase.")
     purge.add_argument("--postgres-dsn", help="DSN PostgreSQL usado quando --backend postgres.")
     purge.add_argument("--postgres-schema", default="public", help="Schema usado quando --backend postgres.")
     purge.add_argument("--postgres-table-prefix", default="agent_tc_", help="Prefixo das tabelas quando --backend postgres.")
-    purge.add_argument("--backend", choices=["sqlite", "supabase", "postgres"], default=default_backend())
+    purge.add_argument("--backend", choices=["sqlite", "postgres"], default=default_backend())
     purge.add_argument("--retention-days", type=int, default=30)
     purge.add_argument(
         "--apply",
@@ -75,13 +70,6 @@ def main() -> int:
                 schema=args.postgres_schema,
                 table_prefix=args.postgres_table_prefix,
             )
-        else:
-            repo = SupabaseRepository(
-                env_path=args.env,
-                schema=args.supabase_schema,
-                table_prefix=args.supabase_table_prefix,
-                dry_run=dry_run,
-            )
         result = repo.purge_inactive_versions(
             retention_days=args.retention_days,
             dry_run=dry_run,
@@ -104,19 +92,4 @@ def parse_now(value: str | None) -> datetime | None:
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except SupabaseHttpError as exc:
-        print(
-            json.dumps(
-                {
-                    "ok": False,
-                    "error": "supabase_http_error",
-                    "status": exc.status,
-                    "message": exc.body,
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
-        raise SystemExit(1)
+    raise SystemExit(main())

@@ -28,7 +28,7 @@ Use `AGENT_TC_BACKEND=postgres` apenas em teste controlado ou quando a infra dec
 
 ## Auth local
 
-A API oferece Auth local para a migracao fora do Supabase Auth:
+A API oferece Auth local no PostgreSQL:
 
 - `POST /auth/register`
 - `POST /auth/login`
@@ -42,6 +42,5 @@ O primeiro cadastro vira admin aprovado automaticamente para bootstrap. As senha
 ## Documentacao
 
 - `API/deploy/d01/DEPLOY_D01_DOCKER.md`: guia operacional atual para API + PostgreSQL + storage local na D01.
-- `docs/RESUMO_MIGRACAO_5_ETAPAS.md`: resumo atual da migracao Supabase/Postgres/storage/Bridge/Auth.
+- `docs/RESUMO_MIGRACAO_5_ETAPAS.md`: resumo atual da migracao para API, PostgreSQL, storage local, Bridge e Auth local.
 - `docs/CANONICAL_DATA_MODEL.md`: modelo canonico do banco.
-- `docs/legacy/`: analises e documentos antigos preservados apenas como historico.
