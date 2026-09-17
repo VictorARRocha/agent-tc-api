@@ -43,6 +43,7 @@ class AgentTcApi:
         openai_client: Any | None = None,
         auth_validator: Any | None = None,
         require_ai_auth: bool = True,
+        require_user_auth: bool = True,
     ):
         self.logs_root = Path(logs_root)
         self.repository = repository or LocalPayloadRepository(self.logs_root)
@@ -51,6 +52,7 @@ class AgentTcApi:
         self.openai_client = openai_client
         self.auth_validator = auth_validator
         self.require_ai_auth = require_ai_auth
+        self.require_user_auth = require_user_auth
         self.local_files_root = _local_files_root(self.env_path)
 
     def route_get(self, path: str, query: dict[str, list[str]], authorization: str | None = None) -> tuple[int, Any]:
@@ -63,6 +65,9 @@ class AgentTcApi:
             return self._auth_get(parts[1:], authorization)
         if len(parts) == 3 and parts[0] == "bridge" and parts[1] == "rerun-requests":
             return self._bridge_get(parts[2], authorization)
+        auth_error = self._user_auth_error(authorization)
+        if auth_error:
+            return auth_error
         if parts == ["modules"]:
             return HTTPStatus.OK, self.repository.modules()
         if len(parts) == 3 and parts[0] == "modules" and parts[2] == "runs":
@@ -91,12 +96,17 @@ class AgentTcApi:
             return self._auth_post(parts[1:], body, authorization)
         if self.read_only:
             return HTTPStatus.METHOD_NOT_ALLOWED, {"error": "read_only_api"}
-        if parts == ["analyze"]:
-            return self._analyze(body)
         if parts == ["ingest"]:
             return self._ingest(body, authorization)
+        if len(parts) == 4 and parts[0] == "bridge" and parts[1] == "rerun-requests":
+            return self._bridge_post(parts[2], parts[3], body, authorization)
         if len(parts) == 3 and parts[0] == "runs" and parts[2] == "ai-group":
             return self._ai_group(parts[1], body, authorization)
+        auth_error = self._user_auth_error(authorization)
+        if auth_error:
+            return auth_error
+        if parts == ["analyze"]:
+            return self._analyze(body)
         if parts == ["rerun-requests"]:
             return HTTPStatus.CREATED, self.repository.record_rerun_request(body)
         if len(parts) == 3 and parts[0] == "rerun-requests" and parts[2] == "cancel":
@@ -108,8 +118,6 @@ class AgentTcApi:
             if isinstance(result, dict) and result.get("error") == "rerun_request_not_cancellable":
                 return HTTPStatus.CONFLICT, {"ok": False, **result}
             return HTTPStatus.ACCEPTED, {"ok": True, "rerun_request": result}
-        if len(parts) == 4 and parts[0] == "bridge" and parts[1] == "rerun-requests":
-            return self._bridge_post(parts[2], parts[3], body, authorization)
         return HTTPStatus.NOT_FOUND, {"error": "not_found", "path": path}
 
     def index(self) -> dict[str, Any]:
@@ -236,6 +244,21 @@ class AgentTcApi:
             return local_auth.validate(authorization)
         raise AuthenticationError("Auth local nao suportado pelo repository atual")
 
+    def _user_auth_error(self, authorization: str | None) -> tuple[int, Any] | None:
+        if not self.require_user_auth:
+            return None
+        try:
+            self._validate_user_auth(authorization)
+        except LocalAuthError as exc:
+            return exc.status, {"ok": False, "error": exc.error, "message": str(exc)}
+        except AuthenticationError as exc:
+            return HTTPStatus.UNAUTHORIZED, {
+                "ok": False,
+                "error": "unauthorized",
+                "message": str(exc),
+            }
+        return None
+
     def _bridge_get(self, child: str, authorization: str | None) -> tuple[int, Any]:
         auth_error = self._bridge_auth_error(authorization)
         if auth_error:
@@ -269,7 +292,10 @@ class AgentTcApi:
     def _bridge_auth_error(self, authorization: str | None) -> tuple[int, Any] | None:
         token = _env_value(self.env_path, "AGENT_TC_BRIDGE_TOKEN")
         if not token:
-            return None
+            return HTTPStatus.SERVICE_UNAVAILABLE, {
+                "ok": False,
+                "error": "bridge_token_not_configured",
+            }
         expected = "Bearer " + token
         if authorization != expected:
             return HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized_bridge"}
@@ -278,7 +304,10 @@ class AgentTcApi:
     def _ingest_auth_error(self, authorization: str | None) -> tuple[int, Any] | None:
         token = _env_value(self.env_path, "AGENT_TC_API_TOKEN") or _env_value(self.env_path, "AGENT_TC_BRIDGE_TOKEN")
         if not token:
-            return None
+            return HTTPStatus.SERVICE_UNAVAILABLE, {
+                "ok": False,
+                "error": "ingest_token_not_configured",
+            }
         expected = "Bearer " + token
         if authorization != expected:
             return HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized_ingest"}
@@ -546,6 +575,10 @@ class AgentTcRequestHandler(BaseHTTPRequestHandler):
         try:
             parsed = urlparse(self.path)
             if parsed.path.startswith("/files/"):
+                auth_error = self.api._user_auth_error(self.headers.get("Authorization"))
+                if auth_error:
+                    self._send(*auth_error)
+                    return
                 self._send_file(parsed.path[len("/files/") :])
                 return
             status, payload = self.api.route_get(parsed.path, parse_qs(parsed.query), self.headers.get("Authorization"))
@@ -635,6 +668,7 @@ def make_server(
     openai_client: Any | None = None,
     auth_validator: Any | None = None,
     require_ai_auth: bool = True,
+    require_user_auth: bool = True,
 ) -> ThreadingHTTPServer:
     api = AgentTcApi(
         logs_root,
@@ -644,6 +678,7 @@ def make_server(
         openai_client=openai_client,
         auth_validator=auth_validator,
         require_ai_auth=require_ai_auth,
+        require_user_auth=require_user_auth,
     )
 
     class Handler(AgentTcRequestHandler):

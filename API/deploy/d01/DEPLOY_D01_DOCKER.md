@@ -34,6 +34,14 @@ Se a API tiver reverse proxy/HTTPS, usar a URL final:
 AGENT_TC_PUBLIC_BASE_URL=https://agent-tc.sci.../files
 ```
 
+No gateway HTTP temporario, a API ocupa a porta 8001 da D01 e o gateway ocupa
+a porta 8000 recebida pela NAT:
+
+```env
+AGENT_TC_API_PORT=8001
+AGENT_TC_PUBLIC_BASE_URL=http://SEU_SUBDOMINIO.duckdns.org:10443/api/files
+```
+
 ## Subir
 
 ```powershell
@@ -68,6 +76,10 @@ http://IP_DA_D01:8000/modules
 http://IP_DA_D01:8000/runs
 ```
 
+`/modules`, `/runs`, `/files` e as demais rotas funcionais exigem uma sessao
+local valida. Apenas a raiz, `/health`, `/auth/login` e `/auth/register` ficam
+publicos. O Bridge e a ingestao continuam usando `AGENT_TC_BRIDGE_TOKEN`.
+
 ## Bridge
 
 Quando o dashboard apontar para a API da D01, o `JenkinsBridge\.env` deve usar:
@@ -93,6 +105,9 @@ PATCH /auth/users/{id}
 ```
 
 O primeiro usuario cadastrado vira `admin` e ja fica aprovado. Os proximos cadastros entram como `pending` ate um admin aprovar.
+
+`AGENT_TC_BRIDGE_TOKEN` e obrigatorio. Se estiver vazio, a API recusa Bridge e
+ingestao com HTTP 503 em vez de deixar essas rotas sem autenticacao.
 
 Opcionalmente ajuste a duracao da sessao no `docker.env`:
 

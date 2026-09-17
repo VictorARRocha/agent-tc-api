@@ -59,7 +59,7 @@ class LocalFileStorageAdapter:
             "bucket": self.bucket,
             "storage_path": normalized_path,
             "public_url": public_url,
-            "signed_url": public_url,
+            "signed_url": "",
             "signed_url_expires_at": None,
         }
 

@@ -354,7 +354,7 @@ class PipelineRegressionTests(unittest.TestCase):
     def test_api_marks_rerun_request_for_cancel(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             repository = SQLiteRepository(Path(temp_dir) / "agent-tc.sqlite")
-            api = AgentTcApi(Path(temp_dir), repository=repository)
+            api = AgentTcApi(Path(temp_dir), repository=repository, require_user_auth=False)
 
             status, created = api.route_post(
                 "/rerun-requests",
@@ -380,7 +380,7 @@ class PipelineRegressionTests(unittest.TestCase):
     def test_api_rejects_cancel_for_finished_rerun_request(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             repository = SQLiteRepository(Path(temp_dir) / "agent-tc.sqlite")
-            api = AgentTcApi(Path(temp_dir), repository=repository)
+            api = AgentTcApi(Path(temp_dir), repository=repository, require_user_auth=False)
             api.route_post(
                 "/rerun-requests",
                 {
