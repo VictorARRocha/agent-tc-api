@@ -1,157 +1,62 @@
-# Deploy Agent TC na D01
+# API e PostgreSQL na D01
 
-Este guia prepara a D01 para hospedar a API do Agent TC e um PostgreSQL local em Docker, sem mexer no container atual do Jenkins.
+Este Compose cria `agent-tc-api` e `agent-tc-postgres`. Ele usa dois volumes
+persistentes: `agent-tc-postgres-data` para o banco e `agent-tc-evidencias`
+para os arquivos. O dashboard/Caddy pertence ao repositorio separado
+`tczinho` e ocupa a porta `8000` do host; a API ocupa `8001`.
 
 ## Arquivos
 
-- `API\Dockerfile`: imagem da API.
-- `API\deploy\d01\docker-compose.d01.yml`: sobe API + PostgreSQL + volumes.
-- `API\deploy\d01\docker.env.example`: modelo de variaveis sem segredos.
-- `docker.env`: arquivo real da D01, criado manualmente a partir do exemplo.
+- `docker-compose.d01.yml`: servicos, portas, volumes e healthchecks.
+- `docker.env`: configuracao real e segredos da D01, fora do Git.
+- `docker.env.example`: modelo sem segredos, alinhado ao arranjo atual.
+- `API/Dockerfile`: imagem Python da API, que incorpora o codigo de
+  `PythonRodagem/agent_tc_core` e suas migrations.
 
-## Preparar variaveis
+O banco usa a porta `5432` somente na rede Docker. A API usa `postgres:5432`
+internamente e publica a porta `8001` no host. O Caddy recebe chamadas na
+`8000` e encaminha as rotas da API. A NAT externa `10443` chega a `8000`.
 
-Na D01, dentro da pasta `C:\TC\Util Compartilhado\AgenteTC\API\deploy\d01`:
+## Configuracao
 
-```powershell
-copy docker.env.example docker.env
-notepad docker.env
-```
-
-Preencher pelo menos:
-
-```env
-POSTGRES_PASSWORD=uma_senha_forte
-AGENT_TC_PUBLIC_BASE_URL=http://IP_DA_D01:8000/files
-AGENT_TC_BRIDGE_TOKEN=um_token_interno_forte
-```
-
-Evite caracteres especiais de URL na senha do Postgres, como `@`, `:`, `/`, `?`, `#` e `&`. Se a infra exigir esses caracteres, a senha precisa ir URL-encoded dentro de `POSTGRES_DSN`.
-
-Se a API tiver reverse proxy/HTTPS, usar a URL final:
-
-```env
-AGENT_TC_PUBLIC_BASE_URL=https://agent-tc.sci.../files
-```
-
-No gateway HTTP temporario, a API ocupa a porta 8001 da D01 e o gateway ocupa
-a porta 8000 recebida pela NAT:
+Na instalacao inicial, copie `docker.env.example` para `docker.env` e preencha
+`POSTGRES_PASSWORD`, `AGENT_TC_BRIDGE_TOKEN` e a chave do provedor de IA.
+Os valores atuais de endereco e porta sao:
 
 ```env
 AGENT_TC_API_PORT=8001
 AGENT_TC_PUBLIC_BASE_URL=http://SEU_SUBDOMINIO.duckdns.org:10443/api/files
-```
-
-## Subir
-
-```powershell
-docker compose --env-file docker.env -f docker-compose.d01.yml up -d --build
-```
-
-Ou use o atalho:
-
-```powershell
-.\run_agent_tc_docker_up.bat
-```
-
-## Validar
-
-```powershell
-docker ps
-docker logs agent-tc-api --tail 80
-docker logs agent-tc-postgres --tail 80
-```
-
-Para acompanhar os logs em tempo real:
-
-```powershell
-.\run_agent_tc_docker_logs.bat
-```
-
-Endpoints esperados:
-
-```text
-http://IP_DA_D01:8000/health
-http://IP_DA_D01:8000/modules
-http://IP_DA_D01:8000/runs
-```
-
-`/modules`, `/runs`, `/files` e as demais rotas funcionais exigem uma sessao
-local valida. Apenas a raiz, `/health`, `/auth/login` e `/auth/register` ficam
-publicos. O Bridge e a ingestao continuam usando `AGENT_TC_BRIDGE_TOKEN`.
-
-## Bridge
-
-Quando o dashboard apontar para a API da D01, o `JenkinsBridge\.env` deve usar:
-
-```env
-JENKINS_BRIDGE_BACKEND=api
-AGENT_TC_API_URL=http://IP_DA_D01:8000
-```
-
-Se `AGENT_TC_BRIDGE_TOKEN` for configurado no `docker.env`, repetir o mesmo valor no `JenkinsBridge\.env`.
-
-## Auth local
-
-A API possui endpoints de Auth local gravando no PostgreSQL da D01:
-
-```text
-POST /auth/register
-POST /auth/login
-POST /auth/logout
-GET  /auth/me
-GET  /auth/users
-PATCH /auth/users/{id}
-```
-
-O primeiro usuario cadastrado vira `admin` e ja fica aprovado. Os proximos cadastros entram como `pending` ate um admin aprovar.
-
-`AGENT_TC_BRIDGE_TOKEN` e obrigatorio. Se estiver vazio, a API recusa Bridge e
-ingestao com HTTP 503 em vez de deixar essas rotas sem autenticacao.
-
-Opcionalmente ajuste a duracao da sessao no `docker.env`:
-
-```env
-AGENT_TC_AUTH_BACKEND=local
-AGENT_TC_AUTH_SESSION_HOURS=24
-```
-
-## Agrupamento por IA
-
-O agrupamento usa o Auth local da API. O dashboard envia o token obtido em `/auth/login`; a API valida esse token antes de executar o agrupamento.
-
-Para habilitar agrupamento, preencher no `docker.env`:
-
-```env
-AI_PROVIDER=openai
-OPENAI_API_KEY=...
-OPENAI_MODEL=gpt-5.4-mini
-```
-
-Se for usar Gemini em vez de OpenAI:
-
-```env
 AI_PROVIDER=gemini
-GEMINI_API_KEY=...
-GEMINI_MODEL=gemini-3.5-flash
 ```
 
-Depois de alterar somente variaveis do `docker.env`, recriar a API para ela carregar os novos valores:
+O Compose define `AGENT_TC_BACKEND=postgres`, `AGENT_TC_STORAGE=local`,
+`AGENT_TC_STORAGE_ROOT=/data/evidencias` e `AGENT_TC_AUTH_BACKEND=local`.
+Consulte [Configuracao](../../../docs/CONFIGURACAO.md) para cada variavel.
+
+## Atualizar sem trocar os volumes
+
+`C:\TC\Util Compartilhado\AgenteTC` e uma copia operacional. Depois de
+sincronizar o codigo versionado para essa pasta na D01, descubra o projeto
+Compose que ja possui os containers:
 
 ```powershell
-docker compose --env-file docker.env -f docker-compose.d01.yml up -d --force-recreate --no-deps api
+cd "C:\TC\Util Compartilhado\AgenteTC\API\deploy\d01"
+$agentTcProject = ((docker inspect agent-tc-api | ConvertFrom-Json)[0].Config.Labels).'com.docker.compose.project'
+$agentTcProject
+docker compose -p $agentTcProject --env-file docker.env -f docker-compose.d01.yml up -d --build
 ```
 
-## Observacoes
-
-- O dashboard deve falar com a API, nunca direto com o PostgreSQL.
-- O PostgreSQL do compose fica acessivel para a API pelo hostname interno `postgres`.
-- A porta publicada da API vem de `AGENT_TC_API_PORT`, por padrao `8000`.
-- Os arquivos de evidencia ficam no volume Docker `agent-tc-evidencias` e sao servidos pela API em `/files/...`.
-- O volume `agent-tc-postgres-data` guarda os dados do banco; backup precisa ser definido pela infra.
-- Esta pasta `API\deploy\d01` precisa ficar dentro da pasta do projeto `AgenteTC`, porque o compose usa `..\..\..` como contexto de build para encontrar `API\Dockerfile` e `PythonRodagem`.
-- Para parar os containers sem apagar os volumes:
+O nome retornado deve ser reutilizado nas atualizacoes. Para validar:
 
 ```powershell
-.\run_agent_tc_docker_down.bat
+docker ps --filter "name=agent-tc"
+irm http://127.0.0.1:8001/health
+irm http://127.0.0.1:8000/health
 ```
+
+O segundo `/health` testa tambem o encaminhamento pelo Caddy. As rotas de
+dados e evidencias exigem sessao de usuario; `/ingest` e `/bridge/*` usam o
+token tecnico. Nunca inclua `-v` em um `docker compose down` desse ambiente.
+
+Para operacao diaria, evidencias, manutencao e backup, consulte
+[Operacao da D01](../../../docs/OPERACAO_D01.md).

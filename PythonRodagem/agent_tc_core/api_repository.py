@@ -112,13 +112,63 @@ class LocalPayloadRepository:
 
         return sorted(by_id.values(), key=lambda row: _node_sort_key(str(row.get("node_id") or "")))
 
-    def record_rerun_request(self, request: dict[str, Any]) -> dict[str, Any]:
+    def record_rerun_request(self, request: dict[str, Any], *, requested_by: str | None = None) -> dict[str, Any]:
         path = self.logs_root / "api_rerun_requests.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         current = {
             "id": "local_" + re.sub(r"[^0-9]", "", _now_stamp()),
             "status": "solicitado_local",
             **request,
+        }
+        if requested_by:
+            current["requested_by"] = requested_by
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(current, ensure_ascii=False) + "\n")
+        return current
+
+    def rerun_requests(self) -> list[dict[str, Any]]:
+        path = self.logs_root / "api_rerun_requests.jsonl"
+        if not path.exists():
+            return []
+        rows = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return list(reversed(rows))
+
+    def _payload_files(self) -> list[Path]:
+        if not self.logs_root.exists():
+            return []
+        return sorted(
+            self.logs_root.rglob("shadow_payload.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+
+    def _payloads(self) -> list[dict[str, Any]]:
+        payloads = []
+        for path in self._payload_files():
+            try:
+                payloads.append(json.loads(path.read_text(encoding="utf-8")))
+            except (OSError, json.JSONDecodeError):
+                continue
+        return payloads
+
+    def _run_row(self, payload: dict[str, Any]) -> dict[str, Any]:
+        rodagem = dict(payload.get("rodagem") or {})
+        module = dict(payload.get("modulo") or {})
+        module_id = str(module.get("id_modulo") or rodagem.get("fk_modulo") or "")
+        return {
+            **rodagem,
+            "modulo": module,
+            "modulo_slug": SLUG_BY_MODULE_ID.get(module_id) or slugify(module.get("nome") or ""),
+            "falhas_count": len(payload.get("falhas") or []),
+            "evidencias_count": len(payload.get("evidencias") or []),
+            "diferencas_count": len(payload.get("diferencas_relatorio") or []),
         }
 
 
@@ -192,55 +242,10 @@ class RemoteApiRepository:
             raise RuntimeError(f"Agent TC API HTTP {exc.code}: {error_body[:2000]}") from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Falha ao conectar na Agent TC API em {self.api_url}: {exc}") from exc
+        except (TimeoutError, OSError) as exc:
+            # Timeout na leitura da resposta nao vem embrulhado em URLError.
+            raise RuntimeError(f"A Agent TC API em {self.api_url} nao respondeu a tempo ({exc}); confira se a rodagem entrou antes de reenviar.") from exc
         return json.loads(response_body) if response_body.strip() else {}
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(current, ensure_ascii=False) + "\n")
-        return current
-
-    def rerun_requests(self) -> list[dict[str, Any]]:
-        path = self.logs_root / "api_rerun_requests.jsonl"
-        if not path.exists():
-            return []
-        rows = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-        return list(reversed(rows))
-
-    def _payload_files(self) -> list[Path]:
-        if not self.logs_root.exists():
-            return []
-        return sorted(
-            self.logs_root.rglob("shadow_payload.json"),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
-        )
-
-    def _payloads(self) -> list[dict[str, Any]]:
-        payloads = []
-        for path in self._payload_files():
-            try:
-                payloads.append(json.loads(path.read_text(encoding="utf-8")))
-            except (OSError, json.JSONDecodeError):
-                continue
-        return payloads
-
-    def _run_row(self, payload: dict[str, Any]) -> dict[str, Any]:
-        rodagem = dict(payload.get("rodagem") or {})
-        module = dict(payload.get("modulo") or {})
-        module_id = str(module.get("id_modulo") or rodagem.get("fk_modulo") or "")
-        return {
-            **rodagem,
-            "modulo": module,
-            "modulo_slug": SLUG_BY_MODULE_ID.get(module_id) or slugify(module.get("nome") or ""),
-            "falhas_count": len(payload.get("falhas") or []),
-            "evidencias_count": len(payload.get("evidencias") or []),
-            "diferencas_count": len(payload.get("diferencas_relatorio") or []),
-        }
 
 
 def _node_sort_key(node_id: str) -> tuple[int, ...]:

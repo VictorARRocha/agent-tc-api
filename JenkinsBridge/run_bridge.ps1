@@ -14,4 +14,15 @@ Write-Host "Base: $BaseDir"
 Write-Host "Log: $(Join-Path $LogDir 'jenkins_bridge.log')"
 Write-Host ""
 
-& python "$BaseDir\jenkins_bridge.py" *>> (Join-Path $LogDir "jenkins_bridge.log")
+$PythonExe = "py"
+$PythonArgs = @("-3")
+try {
+    & py -3 --version *> $null
+}
+catch {
+    $PythonExe = "python"
+    $PythonArgs = @()
+}
+
+# O Bridge grava seu proprio log rotativo em logs\jenkins_bridge.log.
+& $PythonExe @PythonArgs "$BaseDir\jenkins_bridge.py" *>> (Join-Path $LogDir "jenkins_bridge_console.log")

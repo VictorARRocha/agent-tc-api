@@ -3,12 +3,13 @@ from __future__ import annotations
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from agent_tc_core.api_server import AgentTcApi, make_server
-from agent_tc_core.local_auth import LocalAuthService, hash_password, verify_password
+from agent_tc_core.local_auth import LocalAuthError, LocalAuthService, hash_password, verify_password
 
 
 class InMemoryAuthRepository:
@@ -143,6 +144,59 @@ class LocalAuthTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=5)
+
+    def test_locked_account_does_not_reveal_correct_password(self):
+        repo = InMemoryAuthRepository()
+        service = LocalAuthService(repo)
+        service.register({"username": "admin", "password": "senha-forte"})
+        for attempt in range(10):
+            with self.assertRaises(LocalAuthError):
+                service.login("admin", f"errada-{attempt}")
+
+        responses = []
+        for password in ("outra-errada", "senha-forte"):
+            with self.assertRaises(LocalAuthError) as error:
+                service.login("admin", password)
+            responses.append((error.exception.status, error.exception.error))
+
+        self.assertEqual([(423, "user_locked"), (423, "user_locked")], responses)
+
+    def test_failed_attempts_restart_after_lock_expires(self):
+        repo = InMemoryAuthRepository()
+        service = LocalAuthService(repo)
+        user = service.register({"username": "admin", "password": "senha-forte"})
+        expired = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(timespec="seconds")
+        repo.auth_update_user(user["id"], {"failed_login_attempts": 10, "locked_until": expired})
+
+        with self.assertRaises(LocalAuthError) as error:
+            service.login("admin", "errada")
+        self.assertEqual(401, error.exception.status)
+        self.assertEqual(1, repo.users[user["id"]]["failed_login_attempts"])
+        self.assertIsNone(repo.users[user["id"]]["locked_until"])
+
+        with self.assertRaises(LocalAuthError):
+            service.login("admin", "errada-de-novo")
+        self.assertEqual(2, repo.users[user["id"]]["failed_login_attempts"])
+        self.assertIn("token", service.login("admin", "senha-forte"))
+
+    def test_technical_tokens_are_checked_exactly(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_path = Path(temp_dir) / ".env"
+            env_path.write_text("AGENT_TC_BRIDGE_TOKEN=token-tecnico\n", encoding="utf-8")
+            api = AgentTcApi(temp_dir, repository=InMemoryAuthRepository(), env_path=env_path)
+
+            for authorization in (None, "", "Bearer errado", "token-tecnico", "Bearer token-tecnicoX", "Bearer tókén"):
+                status, payload = api.route_get("/bridge/rerun-requests/requested", {}, authorization)
+                self.assertEqual(401, status, authorization)
+                self.assertEqual("unauthorized_bridge", payload["error"])
+                status, payload = api.route_post("/ingest", {"payload": {}}, authorization)
+                self.assertEqual(401, status, authorization)
+                self.assertEqual("unauthorized_ingest", payload["error"])
+
+            status, payload = api.route_get("/bridge/rerun-requests/requested", {}, "Bearer token-tecnico")
+            self.assertEqual(501, status)
+            status, payload = api.route_post("/ingest", {"payload": {}}, "Bearer token-tecnico")
+            self.assertEqual(501, status)
 
     def test_technical_routes_fail_closed_without_bridge_token(self):
         api = AgentTcApi(".", repository=InMemoryAuthRepository(), require_user_auth=False)

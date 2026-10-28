@@ -1,17 +1,49 @@
 import json
+import logging
 import re
 import time
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 import requests
 from dotenv import dotenv_values
 
 
 POLL_INTERVAL_SECONDS = 10
-ENV_VALUES = dotenv_values(".env")
+BASE_DIR = Path(__file__).resolve().parent
+ENV_VALUES = dotenv_values(BASE_DIR / ".env")
+LOG_FILE = BASE_DIR / "logs" / "jenkins_bridge.log"
+LOG_MAX_BYTES = 10 * 1024 * 1024
+LOG_BACKUP_COUNT = 5
+
+LOGGER = logging.getLogger("jenkins_bridge")
+# Ultimo estado registrado por chave; evita repetir a mesma linha a cada ciclo.
+LAST_LOGGED_STATE = {}
+
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def setup_logging():
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    LOGGER.addHandler(handler)
+    LOGGER.setLevel(logging.INFO)
+
+
+def log(message):
+    LOGGER.info("[" + now_iso() + "] " + message)
+
+
+def log_change(key, state, message):
+    """Registra a mensagem so quando o estado associado a chave muda."""
+    if LAST_LOGGED_STATE.get(key) == state:
+        return
+    LAST_LOGGED_STATE[key] = state
+    log(message)
 
 
 def now_ms():
@@ -150,11 +182,12 @@ def compact_config_json(record):
     if config_json is None:
         raise RuntimeError("Campo config_json vazio no registro.")
 
+    # ensure_ascii: acento vai escapado (\u00e7), senao o Jenkins le o form no charset errado (branch com acento quebrava).
     if isinstance(config_json, str):
         parsed = json.loads(config_json)
-        return json.dumps(parsed, separators=(",", ":"), ensure_ascii=False)
+        return json.dumps(parsed, separators=(",", ":"), ensure_ascii=True)
 
-    return json.dumps(config_json, separators=(",", ":"), ensure_ascii=False)
+    return json.dumps(config_json, separators=(",", ":"), ensure_ascii=True)
 
 
 def trigger_jenkins(config, compact_json):
@@ -271,7 +304,31 @@ def cancel_requested_record(config, record):
                 },
             )
         elif queue_id:
-            cancel_queue_item(config, queue_id)
+            try:
+                cancel_queue_item(config, queue_id)
+            except requests.HTTPError:
+                # O Jenkins devolve 500 no cancelItem quando o item ja saiu da fila (virou build ou ja foi cancelado).
+                try:
+                    item = get_queue_item(config, queue_id)
+                except requests.HTTPError:
+                    item = None
+                build_url = ((item or {}).get("executable") or {}).get("url")
+                if build_url:
+                    stop_build(config, build_url)
+                    update_request(
+                        config,
+                        request_id,
+                        {
+                            "status": "cancelando",
+                            "execution_status": "cancelando",
+                            "jenkins_build_url": build_url,
+                            "error_message": "Cancelamento enviado ao build do Jenkins.",
+                        },
+                    )
+                    log("Cancelamento processado para registro " + str(request_id) + ". Item ja era build; build parado.")
+                    return
+                if item is not None and not item.get("cancelled"):
+                    raise
             if queue_item_exists(config, queue_id):
                 message = "Cancelamento enviado para item da fila do Jenkins."
                 update_request(
@@ -308,7 +365,7 @@ def cancel_requested_record(config, record):
                 },
             )
 
-        print("[" + now_iso() + "] Cancelamento processado para registro " + str(request_id) + ". " + message)
+        log("Cancelamento processado para registro " + str(request_id) + ". " + message)
     except Exception as exc:
         message = "Falha ao cancelar no Jenkins: " + safe_text(exc)
         update_request(
@@ -320,7 +377,7 @@ def cancel_requested_record(config, record):
                 "error_message": message,
             },
         )
-        print("[" + now_iso() + "] Erro ao cancelar registro " + str(request_id) + ": " + message)
+        log("Erro ao cancelar registro " + str(request_id) + ": " + message)
 
 
 def monitor_queue_item(config, record):
@@ -346,7 +403,7 @@ def monitor_queue_item(config, record):
                     "error_message": "Item da fila nao existe mais no Jenkins apos solicitacao de cancelamento.",
                 },
             )
-            print("[" + now_iso() + "] Registro " + str(request_id) + " confirmado como cancelado na fila.")
+            log("Registro " + str(request_id) + " confirmado como cancelado na fila.")
             return
         raise
     executable = item.get("executable")
@@ -361,7 +418,7 @@ def monitor_queue_item(config, record):
                 "error_message": None,
             },
         )
-        print("[" + now_iso() + "] Registro " + str(request_id) + " ainda na fila.")
+        log_change(request_id, status, "Registro " + str(request_id) + " ainda na fila.")
         return
 
     build_number = str(executable.get("number"))
@@ -378,7 +435,7 @@ def monitor_queue_item(config, record):
         },
     )
 
-    print("[" + now_iso() + "] Registro " + str(request_id) + " virou build #" + build_number + ".")
+    log("Registro " + str(request_id) + " virou build #" + build_number + ".")
 
 
 def calculate_progress(record, timestamp, estimated_duration):
@@ -421,12 +478,20 @@ def monitor_build(config, record):
         },
     )
 
-        print("[" + now_iso() + "] Registro " + str(request_id) + " rodando: " + str(progress) + "%.")
+        # Registra a cada faixa de 10% (o progresso estimado para em 95%).
+        log_change(
+            request_id,
+            ("cancelando" if is_canceling else "rodando", progress // 10),
+            "Registro " + str(request_id) + " rodando: " + str(progress) + "%.",
+        )
         return
 
     if result == "SUCCESS":
         execution_status = "finalizado_sucesso"
-    elif result in ("FAILURE", "UNSTABLE"):
+    elif result == "UNSTABLE":
+        # O pipeline marca erro/aviso do TC como UNSTABLE: a rodagem foi ate o fim com quebras ou diferencas.
+        execution_status = "finalizado_ocorrencias"
+    elif result == "FAILURE":
         execution_status = "finalizado_falha"
     elif result == "ABORTED":
         execution_status = "cancelado"
@@ -444,7 +509,8 @@ def monitor_build(config, record):
         },
     )
 
-    print("[" + now_iso() + "] Registro " + str(request_id) + " finalizado: " + str(result) + ".")
+    log("Registro " + str(request_id) + " finalizado: " + str(result) + ".")
+    LAST_LOGGED_STATE.pop(request_id, None)
 
 
 def monitor_active_record(config, record):
@@ -465,14 +531,14 @@ def monitor_active_record(config, record):
                 "error_message": message,
             },
         )
-        print("[" + now_iso() + "] Erro ao monitorar registro " + str(request_id) + ": " + str(message))
+        log_change(request_id, ("erro_monitoramento", message), "Erro ao monitorar registro " + str(request_id) + ": " + str(message))
 
 
 def process_record(config, record):
     request_id = record["id"]
 
     if not claim_request(config, record):
-        print("[" + now_iso() + "] Registro " + str(request_id) + " ja foi capturado por outro processo.")
+        log("Registro " + str(request_id) + " ja foi capturado por outro processo.")
         return
 
     try:
@@ -481,27 +547,27 @@ def process_record(config, record):
 
         if response.status_code in (200, 201, 202):
             save_jenkins_success(config, request_id, response)
-            print("[" + now_iso() + "] Registro " + str(request_id) + " enviado ao Jenkins.")
+            log("Registro " + str(request_id) + " enviado ao Jenkins.")
         else:
             message = "Jenkins retornou HTTP " + str(response.status_code)
             save_jenkins_error(config, request_id, message, response)
-            print("[" + now_iso() + "] Registro " + str(request_id) + " marcado como erro: " + message + ".")
+            log("Registro " + str(request_id) + " marcado como erro: " + message + ".")
     except Exception as exc:
         message = "Falha ao processar registro: " + str(exc)
         save_jenkins_error(config, request_id, message)
-        print("[" + now_iso() + "] Registro " + str(request_id) + " marcado como erro: " + message + ".")
+        log("Registro " + str(request_id) + " marcado como erro: " + message + ".")
 
 
 def run_loop():
     config = load_config()
-    print("[" + now_iso() + "] Jenkins Bridge iniciado.")
+    log("Jenkins Bridge iniciado.")
 
     while True:
         try:
             records = fetch_requested(config)
 
             if records:
-                print("[" + now_iso() + "] Registros solicitados encontrados: " + str(len(records)) + ".")
+                log("Registros solicitados encontrados: " + str(len(records)) + ".")
 
             for record in records:
                 process_record(config, record)
@@ -509,24 +575,35 @@ def run_loop():
             cancel_records = fetch_cancel_requested(config)
 
             if cancel_records:
-                print("[" + now_iso() + "] Registros com cancelamento solicitado: " + str(len(cancel_records)) + ".")
+                log("Registros com cancelamento solicitado: " + str(len(cancel_records)) + ".")
 
             for record in cancel_records:
                 cancel_requested_record(config, record)
 
             active_records = fetch_active_requests(config)
 
-            if active_records:
-                print("[" + now_iso() + "] Registros ativos para monitorar: " + str(len(active_records)) + ".")
+            log_change(
+                "active_records",
+                len(active_records),
+                "Registros ativos para monitorar: " + str(len(active_records)) + ".",
+            )
 
             for record in active_records:
                 monitor_active_record(config, record)
 
+            if LAST_LOGGED_STATE.pop("loop_error", None) is not None:
+                log("Loop principal normalizado.")
         except Exception as exc:
-            print("[" + now_iso() + "] Erro no loop principal: " + str(exc))
+            log_change("loop_error", str(exc), "Erro no loop principal: " + str(exc))
 
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":
-    run_loop()
+    setup_logging()
+    try:
+        run_loop()
+    except Exception:
+        # Sem console (pythonw/tarefa agendada), o erro fatal so fica registrado aqui.
+        LOGGER.exception("[" + now_iso() + "] Jenkins Bridge encerrado por erro fatal.")
+        raise

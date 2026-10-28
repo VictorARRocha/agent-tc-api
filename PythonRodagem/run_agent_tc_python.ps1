@@ -139,6 +139,15 @@ if ($SystemHint.ToLowerInvariant() -eq "practice") {
     if ($AutoSystemText.Contains("suprema") -or $AutoSystemText.Contains("integracoes")) {
         $MdsPath = $SupremaMdsPath
     }
+    # VM sem o Unico (a do Suprema/Practice): comeca por um .mds que exista; o Python troca pelo dos casos.
+    if ($MdsPath -eq "C:\TC\Unico\Unico.mds" -and -not (Test-Path -LiteralPath $MdsPath)) {
+        if (Test-Path -LiteralPath $SupremaMdsPath) {
+            $MdsPath = $SupremaMdsPath
+        } else {
+            $MdsPath = $PracticeMdsPaths
+            if (-not $PjsExplicit) { $ProjectSuitePath = $PracticeProjectSuite }
+        }
+    }
 }
 
 Write-Host "MDS selecionado: $MdsPath"
@@ -171,8 +180,17 @@ Write-Host ""
 
 Set-Location -LiteralPath $BaseDir
 
-$pythonArgs = @(
-    "-3",
+$PythonExe = "py"
+$pythonArgs = @("-3")
+try {
+    & py -3 --version *> $null
+}
+catch {
+    $PythonExe = "python"
+    $pythonArgs = @()
+}
+
+$pythonArgs += @(
     (Join-Path $BaseDir "cli\agent_tc_ingest.py"),
     "--backend", $Backend,
     "--env", $EnvFile,
@@ -187,8 +205,17 @@ if ($TimesFolder) {
 if ($ProjectSuitePath) {
     $pythonArgs += @("--project-suite", $ProjectSuitePath)
 }
+# Sem sistema/MDS fixos, o Python escolhe o .mds pelos casos da rodagem (16 = Suprema, 19 = Practice):
+# o nome da pasta do Suprema e so a versao (8.09a dd_MM_yyyy HH_mm_ss).
+if (-not $SystemHint -and -not $MdsExplicit) {
+    $pythonArgs += @(
+        "--mds-suprema", $SupremaMdsPath,
+        "--mds-practice", $PracticeMdsPaths,
+        "--project-suite-practice", $PracticeProjectSuite
+    )
+}
 
-& py @pythonArgs *> $RunLog
+& $PythonExe @pythonArgs *> $RunLog
 $ExitCode = $LASTEXITCODE
 
 Write-Host ""

@@ -15,15 +15,17 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def module_from_failures(failures: list[FailureAnalysis]) -> dict[str, str]:
+def module_from_failures(failures: list[FailureAnalysis], measured_case_ids: list[str] | None = None) -> dict[str, str]:
+    # O modulo e da rodagem: conta as falhas e os casos que tiveram tempo medido. As configuracoes
+    # gerais [0.x] rodam em todo modulo e nao decidem (uma falha [0.2] numa rodagem da Folha a mandava
+    # para o Geral); so sem nenhum outro caso a rodagem e do Geral.
     counts: dict[str, int] = {}
-    for failure in failures:
-        case_id = failure.archive.id_caso_teste
-        if case_id == "ID invalido":
-            continue
+    case_ids = [f.archive.id_caso_teste for f in failures if f.archive.id_caso_teste != "ID invalido"]
+    for case_id in case_ids + [str(c) for c in measured_case_ids or []]:
         prefix = case_id.split(".", 1)[0]
-        module_id = MODULE_BY_PREFIX.get(prefix, MODULE_BY_PREFIX["0"])["id"]
-        counts[module_id] = counts.get(module_id, 0) + 1
+        if prefix != "0" and prefix in MODULE_BY_PREFIX:
+            module_id = MODULE_BY_PREFIX[prefix]["id"]
+            counts[module_id] = counts.get(module_id, 0) + 1
     if not counts:
         return MODULE_BY_PREFIX["0"]
     selected_id = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
@@ -66,8 +68,10 @@ def build_shadow_payload(
     processing_errors: list[dict[str, object]] | None = None,
     delay_rows: list[DelayRow] | None = None,
     archive_integrity: dict[str, object] | None = None,
+    repository: dict[str, str] | None = None,
+    measured_case_ids: list[str] | None = None,
 ) -> dict[str, object]:
-    module = module_from_failures(failures)
+    module = module_from_failures(failures, measured_case_ids)
     testcase_hierarchy_rows = hierarchy_rows_for_module(
         mds_hierarchy_rows or [],
         module,
@@ -293,6 +297,9 @@ def build_shadow_payload(
             "created_at": now_iso(),
             "fk_modulo": module["id"],
             "vm_name": run.vm_name,
+            "repositorio_url": (repository or {}).get("url"),
+            "repositorio_raiz": (repository or {}).get("raiz"),
+            "repositorio_revisao": (repository or {}).get("revisao"),
         },
         "modulo": {"id_modulo": module["id"], "nome": module["nome"]},
         "agrupamentos_shadow": clusters,

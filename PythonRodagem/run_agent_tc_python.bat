@@ -1,6 +1,8 @@
 @echo off
 setlocal EnableDelayedExpansion
 chcp 65001 > nul
+REM Saida do Python em UTF-8 (redirecionada para o log ela seria cp1252 e um acento derrubava o print final).
+set "PYTHONUTF8=1"
 
 echo ========================================
 echo Agent TC - Python pos-rodagem
@@ -146,6 +148,10 @@ if not exist "!RUN_FOLDER!" (
 )
 
 set "AUTO_SYSTEM_TEXT=!RUN_FOLDER! !VERSION_HINT!"
+REM Sem sistema/MDS fixos, o Python escolhe o .mds pelos casos da rodagem (16 = Suprema, 19 = Practice):
+REM o nome da pasta do Suprema e so a versao (8.09a dd_MM_yyyy HH_mm_ss).
+set "AUTO_MDS=0"
+if "%AGENT_TC_SYSTEM%"=="" if "%MDS_EXPLICIT%"=="0" set "AUTO_MDS=1"
 if /I "%AGENT_TC_SYSTEM%"=="practice" (
     set "MDS_PATH=%AGENT_TC_PRACTICE_MDS_PATHS%"
     if "%PJS_EXPLICIT%"=="0" set "PROJECT_SUITE_PATH=%AGENT_TC_PRACTICE_PROJECT_SUITE%"
@@ -162,6 +168,16 @@ if /I "%AGENT_TC_SYSTEM%"=="practice" (
         if "!ERRORLEVEL!"=="0" set "MDS_PATH=%AGENT_TC_SUPREMA_MDS_PATH%"
     )
 )
+REM VM sem o Unico (a do Suprema/Practice): comeca por um .mds que exista, senao o envio parava aqui;
+REM o Python troca pelo .mds dos casos da rodagem.
+if "!AUTO_MDS!"=="1" if "!MDS_PATH!"=="%AGENT_TC_MDS_PATH%" if not exist "!MDS_PATH!" (
+    if exist "%AGENT_TC_SUPREMA_MDS_PATH%" (
+        set "MDS_PATH=%AGENT_TC_SUPREMA_MDS_PATH%"
+    ) else (
+        set "MDS_PATH=%AGENT_TC_PRACTICE_MDS_PATHS%"
+        if "%PJS_EXPLICIT%"=="0" set "PROJECT_SUITE_PATH=%AGENT_TC_PRACTICE_PROJECT_SUITE%"
+    )
+)
 
 echo MDS selecionado: !MDS_PATH!
 if not "!PROJECT_SUITE_PATH!"=="" echo ProjectSuite selecionado: !PROJECT_SUITE_PATH!
@@ -176,6 +192,9 @@ if not "!PROJECT_SUITE_PATH!"=="" (
         goto ERRO_FINAL
     )
 )
+
+set "AUTO_MDS_ARGS="
+if "!AUTO_MDS!"=="1" set AUTO_MDS_ARGS=--mds-suprema "%AGENT_TC_SUPREMA_MDS_PATH%" --mds-practice "%AGENT_TC_PRACTICE_MDS_PATHS%" --project-suite-practice "%AGENT_TC_PRACTICE_PROJECT_SUITE%"
 
 for /f %%T in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "TS=%%T"
 
@@ -199,7 +218,8 @@ pushd "%BASE_DIR%"
   --output-root "%LOG_DIR%" ^
   --vm "%VM_NAME%" ^
   --times-folder "%TIMES_FOLDER%" ^
-  --project-suite "!PROJECT_SUITE_PATH!" > "%RUN_LOG%" 2>&1
+  --project-suite "!PROJECT_SUITE_PATH!" ^
+  !AUTO_MDS_ARGS! > "%RUN_LOG%" 2>&1
 
 set "EXITCODE=%ERRORLEVEL%"
 

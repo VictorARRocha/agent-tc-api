@@ -62,6 +62,49 @@ def normalize_run_version(raw_version: str, mds_path: str | Path) -> str:
     return version
 
 
+PRACTICE_INDIVIDUAL = "practice base individual"
+PRACTICE_AGRUPADA = "practice base agrupada"
+# A Base Agrupada roda antes da Individual na mesma rodagem; uma Agrupada mais velha que isso e de outra.
+JANELA_PRACTICE = timedelta(hours=24)
+
+
+def _inicio_da_pasta(nome: str) -> tuple[str, datetime] | None:
+    match = RUN_NAME_RE.match(nome)
+    if not match:
+        return None
+    inicio = datetime.strptime(match.group("date") + " " + match.group("time"), "%d_%m_%Y %H_%M_%S")
+    return (match.group("prefix") or "").strip(), inicio
+
+
+def pasta_agrupada_do_practice(run_folder: str | Path) -> Path | None:
+    """Pasta da Base Agrupada da mesma rodagem do Practice, a partir da pasta da Base Individual.
+
+    Uma rodagem do Practice roda os dois projetos e cada um cria a sua pasta, mas so o fim da
+    Individual chama o AgenteTC. A Agrupada e a mais recente da mesma versao, iniciada ate 24 h antes.
+    """
+    pasta = Path(run_folder)
+    atual = _inicio_da_pasta(pasta.name)
+    if not atual or not atual[0].lower().startswith(PRACTICE_INDIVIDUAL):
+        return None
+    versao = atual[0][len(PRACTICE_INDIVIDUAL):].strip().lower()
+    melhor: tuple[datetime, Path] | None = None
+    try:
+        irmas = list(pasta.parent.iterdir())
+    except OSError:
+        return None
+    for irma in irmas:
+        dados = _inicio_da_pasta(irma.name) if irma.is_dir() else None
+        if not dados or not dados[0].lower().startswith(PRACTICE_AGRUPADA):
+            continue
+        if dados[0][len(PRACTICE_AGRUPADA):].strip().lower() != versao:
+            continue
+        if not (atual[1] - JANELA_PRACTICE <= dados[1] <= atual[1]):
+            continue
+        if melhor is None or dados[1] > melhor[0]:
+            melhor = (dados[1], irma)
+    return melhor[1] if melhor else None
+
+
 def parse_run_context(
     *,
     run_folder: str | Path,

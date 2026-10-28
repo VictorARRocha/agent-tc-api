@@ -1,7 +1,10 @@
-# Modelo Canonico Agent TC
+# Modelo de dados do Agent TC
 
-Este documento define o modelo de dados do Agent TC para Postgres puro,
-SQLite de teste, outro banco relacional ou API intermediaria.
+Resumo do modelo implementado no PostgreSQL da D01. A definicao exata de
+colunas, tipos, chaves e indices esta nas migrations em
+`PythonRodagem/database/postgres/`. O dashboard consome a API e nao depende
+diretamente dos nomes das tabelas. SQLite continua disponivel para testes e
+execucoes locais controladas.
 
 ## Principios
 
@@ -49,8 +52,12 @@ Campos:
 - `status`: texto.
 - `total_archives`: inteiro.
 - `total_occurrences`: inteiro.
-- `total_executed`: inteiro nullable. Total real executado vindo de `TotalTestesRodados.txt`, `wpSomaCasosExecutados` no `.mds` ou `wpSomaCasosExecutados` no `.pjs` do ProjectSuite.
+- `total_executed`: inteiro nullable. Total real executado vindo de `TotalTestesRodados.txt`, `wpSomaCasosExecutados` no `.mds` ou `wpSomaCasosExecutados` no `.pjs` do ProjectSuite. No Suprema e no Practice, conta os casos da rodagem (os medidos no `Tempo CT.csv` e os que falharam).
 - `total_ai_groups`: inteiro.
+- `repository_url`, `repository_root`, `repository_revision`: texto nullable.
+  Origem SVN da rodagem (`svn info` do projeto na VM), usada pela regravacao.
+  Na importacao pelo dashboard, a URL e a da branch escolhida e a revisao fica
+  vazia.
 - `created_at`: timestamp.
 - `updated_at`: timestamp.
 
@@ -73,7 +80,8 @@ Campos:
 - `node_id`: texto. Ex.: `3.1.3.8`.
 - `parent_node_id`: texto nullable.
 - `node_name`: texto.
-- `node_type`: texto. Valores: `group`, `case`.
+- `node_type`: texto. Valores: `grupo`, `caso`.
+- `description`: texto nullable. Descricao do caso/grupo no `.mds`.
 - `full_path_ids_json`: JSON/texto.
 - `full_path_names_json`: JSON/texto.
 - `full_path_label`: texto.
@@ -167,6 +175,10 @@ Valores de `upload_status`:
 - `uploaded`
 - `failed`
 - `skipped`
+
+O storage em uso e `local`. Os campos de URL e provedor permitem representar
+outros destinos, mas o adapter `s3` ainda nao esta implementado. Uma URL
+registrada em `public_url` nao dispensa a autenticacao exigida por `/files/...`.
 
 ### `report_differences`
 
@@ -292,30 +304,56 @@ Campos:
 - `created_at`: timestamp.
 - `updated_at`: timestamp.
 
-## Compatibilidade Com Schema Atual
+## Pedidos dos Bridges e dados do dashboard
 
-Mapeamento inicial:
+- `run_presets`: pre-definicoes de rodagem Jenkins salvas no dashboard
+  (compartilhadas entre usuarios).
+- `regravacao_requests`: pedidos de regravacao de bases. Guarda a rodagem, a
+  URL de destino no SVN, os arquivos (`items_json`), o resultado por arquivo
+  (`result_json`, com `conflito` quando a base mudou) e a revisao do commit.
+  Executados pelo RegravacaoBridge.
+- `import_requests`: pedidos de importacao de rodagem pela pasta do log
+  compactado: pasta, VM, `branch_url` escolhida, codigo de saida e fim da saida
+  do `.bat`. Executados pelo RegravacaoBridge.
+- `merge_requests`: pedidos de merge entre branches (origem, destino, previa,
+  conflitos e resultado). Executados pelo MergeBridge.
+- `svn_branch_cache`: uma linha (`id = atual`) com a lista de branches do
+  projeto do TC, enviada pelo MergeBridge.
+- `testcase_disabled`: casos desmarcados pelo `mod_xml.py` em toda rodagem
+  (`disabled_by = mod_xml`), sincronizados a cada ingestao do Unico. Marcacoes
+  antigas feitas a mao no dashboard ficam no banco, mas nao sao exibidas.
+- `testcase_times`: medicoes de tempo de cada caso, uma por caso e inicio de
+  rodagem (lidas do `<Sistema> Tempo CT.csv`).
+- `testcase_time_bases`: tempo base de cada caso (`origin`: `planilha`,
+  `primeira_medicao` ou `substituida`); so quem tem a permissao `regravar`
+  troca a base. A carga inicial vem de `cli/agent_tc_importar_tempos.py`.
 
-- `modulos` -> `modules`
-- `rodagens` -> `runs`
-- `falhas` -> `occurrences`
-- `evidencias` -> `evidence_files`
-- `diferencas_relatorio` -> `report_differences`
-- `agrupamentos` -> `ai_groups`
-- `falhas.fk_cluster` -> `ai_group_occurrences`
-- `proximos_passos` -> `recommended_actions`
-- `atrasos_rodagem` -> `run_delays`
-- `rerun_requests` -> `rerun_requests`
-- `testcase_hierarchy` -> `testcase_hierarchy`
+## Tabelas auxiliares e de autenticacao
 
-## Proximos Passos
+- `ingestion_batches`: acompanha a importacao de cada payload.
+- `ai_analysis_jobs`: acompanha as solicitacoes de agrupamento por IA.
+- `app_users`: perfil, hash de senha, papel e estado de aprovacao, mais
+  `permissions` (JSON: `rodagem`, `merge`, `regravar`; vazio = so ver) e
+  `modules` (JSON com os slugs dos modulos, ou `["*"]` = todos).
+- `auth_sessions`: somente o hash do token de sessao e sua validade.
+- `permission_catalog`, `user_permissions`, `user_module_permissions`:
+  previstas no schema inicial e nao usadas. As permissoes valem pelas colunas
+  `permissions` e `modules` de `app_users`.
+- `admin_audit_log`: historico das acoes administrativas gravadas pela API.
+- `schema_migrations`: versoes das migrations aplicadas.
 
-1. Revisar nomes das tabelas e campos.
-2. Criar `database/postgres/001_initial.sql`.
-3. Criar `database/sqlite/001_initial.sql` para testes locais.
-4. Manter este documento alinhado com as migrations de Postgres.
-5. Criar adapters Python:
-   - `LocalJsonRepository`
-   - `CanonicalRepository`
-   - `PostgresRepository`
-   - `SQLiteRepository`
+Com o prefixo padrao `agent_tc_`, `runs` corresponde a
+`public.agent_tc_runs`, `app_users` a `public.agent_tc_app_users` e assim por
+diante. O banco guarda metadados das evidencias; o conteudo dos arquivos fica
+no volume Docker de evidencias montado em `/data/evidencias` na API.
+
+## Evolucao do schema
+
+As migrations ficam numeradas em `PythonRodagem/database/postgres/`, de
+`001_initial.sql` a `014_import_branch.sql` (a mais recente); cada arquivo
+comeca com um comentario do que muda. O `PostgresRepository.initialize()`
+aplica as migrations ao iniciar a API e inicializa o storage. O SQLite usa
+`database/sqlite/001_initial.sql` e acrescenta colunas novas em
+`SQLiteRepository.initialize()`.
+Para conferir uma alteracao futura, consulte primeiro esses arquivos e os
+testes em `PythonRodagem/tests/`.

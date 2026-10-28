@@ -27,10 +27,16 @@ if "%ERRORLEVEL%"=="0" set "PY_CMD=py -3"
 
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%" >nul 2>nul
 
-for /f "tokens=1-4 delims=/ " %%a in ("%date%") do set "DATA_LOG=%%d%%b%%c"
-for /f "tokens=1-3 delims=:, " %%a in ("%time%") do set "HORA_LOG=%%a%%b%%c"
-set "HORA_LOG=%HORA_LOG: =0%"
-set "LOG_FILE=%LOG_DIR%\agent_tc_maintenance_%DATA_LOG%_%HORA_LOG%.log"
+REM Data/hora pelo PowerShell: o %date% muda de formato com o idioma do Windows (em pt-BR saia so mes e ano).
+for /f %%T in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "TS=%%T"
+set "LOG_FILE=%LOG_DIR%\agent_tc_maintenance_%TS%.log"
+
+REM Nas VMs o .env usa a API (sem acesso ao banco): a limpeza roda uma vez por dia na D01 (API\deploy\d01\vigia_docker.ps1).
+if /I "%BACKEND%"=="api" (
+    echo Limpeza nao roda com AGENT_TC_BACKEND=api: ela e diaria, na D01 ^(vigia_docker.ps1^). > "%LOG_FILE%"
+    echo Limpeza pulada: roda na D01. Log: %LOG_FILE%
+    exit /b 0
+)
 
 echo ======================================== > "%LOG_FILE%"
 echo Agent TC - manutencao diaria >> "%LOG_FILE%"

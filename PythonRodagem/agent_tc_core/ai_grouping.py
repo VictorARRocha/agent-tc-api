@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,11 @@ from urllib.request import Request, urlopen
 MAX_TEXT_LENGTH = 1600
 DEFAULT_OPENAI_MODEL = "gpt-5.4-mini"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
+DEFAULT_GEMINI_FALLBACK_MODEL = "gemini-3.5-flash-lite"
+DEFAULT_AI_RETRIES = 2
+DEFAULT_AI_RETRY_SECONDS = 15
+# Provedor ocupado, limite por minuto ou fora do ar: esperar e repetir costuma resolver.
+RETRYABLE_HTTP_CODES = {408, 429, 500, 502, 503, 504}
 DEFAULT_GEMINI_MAX_OUTPUT_TOKENS = 12000
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 GEMINI_OPENAI_CHAT_COMPLETIONS_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
@@ -25,6 +31,10 @@ DEFAULT_BATCH_SIZE = 25
 
 class AiGroupingError(RuntimeError):
     pass
+
+
+class AiGroupingBusyError(AiGroupingError):
+    """Provedor ocupado ou fora do ar: vale esperar e tentar de novo."""
 
 
 class AiGroupingValidationError(AiGroupingError):
@@ -108,9 +118,9 @@ class OpenAIResponsesClient:
                 raw_response = json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise AiGroupingError(f"OpenAI HTTP {exc.code}: {detail[:500]}") from exc
-        except URLError as exc:
-            raise AiGroupingError("Falha de conexao com a OpenAI: " + str(exc)) from exc
+            raise _http_error("OpenAI", exc.code, detail) from exc
+        except (URLError, TimeoutError) as exc:
+            raise AiGroupingBusyError("Falha de conexao com a OpenAI: " + str(exc)) from exc
 
         output_text = _extract_output_text(raw_response)
         try:
@@ -139,11 +149,11 @@ class GeminiChatCompletionsClient:
         self.max_output_tokens = max_output_tokens
 
     @classmethod
-    def from_env(cls, env_path: str | Path | None = None) -> "GeminiChatCompletionsClient":
+    def from_env(cls, env_path: str | Path | None = None, *, model: str | None = None) -> "GeminiChatCompletionsClient":
         env = _read_env(env_path)
         return cls(
             api_key=env.get("GEMINI_API_KEY", ""),
-            model=env.get("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL,
+            model=model or env.get("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL,
             timeout=_positive_int(env.get("GEMINI_TIMEOUT_SECONDS") or env.get("AI_TIMEOUT_SECONDS"), 120),
             max_output_tokens=_positive_int(
                 env.get("GEMINI_MAX_OUTPUT_TOKENS") or env.get("AI_MAX_OUTPUT_TOKENS"),
@@ -184,9 +194,9 @@ class GeminiChatCompletionsClient:
             detail = exc.read().decode("utf-8", errors="replace")
             if exc.code == 400 and "response_format" in detail:
                 return self._group_failures_without_schema(ai_input)
-            raise AiGroupingError(f"Gemini HTTP {exc.code}: {detail[:500]}") from exc
-        except URLError as exc:
-            raise AiGroupingError("Falha de conexao com o Gemini: " + str(exc)) from exc
+            raise _http_error("Gemini", exc.code, detail) from exc
+        except (URLError, TimeoutError) as exc:
+            raise AiGroupingBusyError("Falha de conexao com o Gemini: " + str(exc)) from exc
 
         output_text = _extract_chat_completion_text(raw_response, provider="Gemini")
         try:
@@ -218,9 +228,9 @@ class GeminiChatCompletionsClient:
                 raw_response = json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise AiGroupingError(f"Gemini HTTP {exc.code}: {detail[:500]}") from exc
-        except URLError as exc:
-            raise AiGroupingError("Falha de conexao com o Gemini: " + str(exc)) from exc
+            raise _http_error("Gemini", exc.code, detail) from exc
+        except (URLError, TimeoutError) as exc:
+            raise AiGroupingBusyError("Falha de conexao com o Gemini: " + str(exc)) from exc
 
         output_text = _extract_chat_completion_text(raw_response, provider="Gemini")
         try:
@@ -230,14 +240,63 @@ class GeminiChatCompletionsClient:
         return parsed, raw_response
 
 
+class FallbackAiClient:
+    """Niveis de modelo em ordem: no "ocupado" espera e repete; em outro erro passa ao proximo nivel."""
+
+    def __init__(self, levels: list[tuple[Any, int]], *, retry_seconds: int = DEFAULT_AI_RETRY_SECONDS, sleep: Any = time.sleep):
+        if not levels:
+            raise AiGroupingError("Nenhum modelo de IA configurado")
+        self.levels = levels
+        self.retry_seconds = retry_seconds
+        self.sleep = sleep
+        self.provider = levels[0][0].provider
+        self.model = levels[0][0].model
+        # (provedor, modelo) que respondeu cada chamada; o job grava o que foi usado de fato.
+        self.used: list[tuple[str, str]] = []
+
+    def group_failures(self, ai_input: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        errors: list[str] = []
+        last_validation: AiGroupingValidationError | None = None
+        for level, (client, retries) in enumerate(self.levels):
+            for attempt in range(retries + 1):
+                try:
+                    candidate, raw_response = client.group_failures(ai_input)
+                    # Resposta invalida de um nivel tambem passa ao proximo.
+                    validate_ai_grouping_response(candidate, ai_input)
+                except AiGroupingBusyError as exc:
+                    errors.append(f"{client.model}: {exc}")
+                    if attempt < retries:
+                        self.sleep(self.retry_seconds)
+                    continue
+                except AiGroupingError as exc:
+                    errors.append(f"{client.model}: {exc}")
+                    if isinstance(exc, AiGroupingValidationError):
+                        last_validation = exc
+                    break
+                self.used.append((client.provider, client.model + (" (reserva)" if level else "")))
+                return candidate, raw_response
+        if last_validation is not None and len(errors) == 1:
+            raise last_validation
+        raise AiGroupingError("Nenhum modelo conseguiu agrupar. " + " | ".join(error[:300] for error in errors))
+
+
 def ai_client_from_env(env_path: str | Path | None = None) -> Any:
     env = _read_env(env_path)
     provider = (env.get("AI_PROVIDER") or "openai").strip().lower()
+    if provider not in ("openai", "gemini"):
+        raise AiGroupingError("AI_PROVIDER invalido. Use openai ou gemini")
+    retries = _non_negative_int(env.get("AI_RETRIES"), DEFAULT_AI_RETRIES)
+    # 1) provedor principal com novas tentativas; 2) OpenAI, so com chave; 3) Gemini mais leve.
     if provider == "openai":
-        return OpenAIResponsesClient.from_env(env_path)
-    if provider == "gemini":
-        return GeminiChatCompletionsClient.from_env(env_path)
-    raise AiGroupingError("AI_PROVIDER invalido. Use openai ou gemini")
+        levels: list[tuple[Any, int]] = [(OpenAIResponsesClient.from_env(env_path), retries)]
+    else:
+        levels = [(GeminiChatCompletionsClient.from_env(env_path), retries)]
+        if env.get("OPENAI_API_KEY"):
+            levels.append((OpenAIResponsesClient.from_env(env_path), 0))
+    fallback_model = env.get("GEMINI_FALLBACK_MODEL", DEFAULT_GEMINI_FALLBACK_MODEL)
+    if env.get("GEMINI_API_KEY") and fallback_model and fallback_model != levels[0][0].model:
+        levels.append((GeminiChatCompletionsClient.from_env(env_path, model=fallback_model), 1))
+    return FallbackAiClient(levels, retry_seconds=_non_negative_int(env.get("AI_RETRY_SECONDS"), DEFAULT_AI_RETRY_SECONDS))
 
 
 def build_ai_grouping_input(repository: Any, run_id: str) -> dict[str, Any]:
@@ -738,18 +797,34 @@ def _read_env(path: str | Path | None) -> dict[str, str]:
         "AI_PROVIDER",
         "AI_TIMEOUT_SECONDS",
         "AI_MAX_OUTPUT_TOKENS",
+        "AI_RETRIES",
+        "AI_RETRY_SECONDS",
         "OPENAI_API_KEY",
         "OPENAI_MODEL",
         "OPENAI_TIMEOUT_SECONDS",
         "OPENAI_MAX_OUTPUT_TOKENS",
         "GEMINI_API_KEY",
         "GEMINI_MODEL",
+        "GEMINI_FALLBACK_MODEL",
         "GEMINI_TIMEOUT_SECONDS",
         "GEMINI_MAX_OUTPUT_TOKENS",
     ):
         if os.getenv(key):
             values[key] = os.environ[key]
     return values
+
+
+def _http_error(provider: str, code: int, detail: str) -> AiGroupingError:
+    error_class = AiGroupingBusyError if code in RETRYABLE_HTTP_CODES else AiGroupingError
+    return error_class(f"{provider} HTTP {code}: {detail[:500]}")
+
+
+def _non_negative_int(value: str | None, default: int) -> int:
+    try:
+        parsed = int(value) if value not in (None, "") else default
+    except ValueError:
+        return default
+    return parsed if parsed >= 0 else default
 
 
 def _positive_int(value: str | None, default: int) -> int:

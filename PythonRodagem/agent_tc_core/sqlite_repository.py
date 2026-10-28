@@ -10,6 +10,9 @@ from typing import Any
 
 from .api_repository import OFFICIAL_MODULES, SLUG_BY_MODULE_ID, slugify
 from .constants import MODULE_CODES_BY_ID
+from . import tempos_casos
+from .mod_xml_desmarcados import motivo as mod_xml_motivo
+from .testcase_disabled import MOD_XML_AUTOR, module_of_node
 from .utils import ascii_lower
 
 
@@ -33,11 +36,20 @@ class SQLiteRepository:
         conn = self.connect()
         try:
             conn.executescript(SQLITE_SCHEMA.read_text(encoding="utf-8"))
-            try:
-                conn.execute("ALTER TABLE runs ADD COLUMN total_executed INTEGER")
-            except sqlite3.OperationalError as exc:
-                if "duplicate column" not in str(exc).lower():
-                    raise
+            for table, column in (
+                ("runs", "total_executed INTEGER"),
+                ("runs", "repository_url TEXT"),
+                ("runs", "repository_root TEXT"),
+                ("runs", "repository_revision TEXT"),
+                ("regravacao_requests", "commit_message TEXT"),
+                ("import_requests", "branch_url TEXT"),
+                ("testcase_hierarchy", "description TEXT"),
+            ):
+                try:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc).lower():
+                        raise
             self.seed_modules(conn)
         finally:
             conn.close()
@@ -99,13 +111,17 @@ class SQLiteRepository:
             "vm_name": str(run.get("vm_name") or "").lower(),
             "module_id": module_id,
             "started_at": run.get("data_inicio") or now,
-            "finished_at": None,
+            # Reprocessar a pasta depois nao muda o fim: vale o da primeira analise.
+            "finished_at": self._fim_ja_gravado(run_id) or run.get("data_fim"),
             "logs_path": run.get("caminho_logs") or "",
             "status": "processing",
             "total_archives": run.get("total_archives") if run.get("total_archives") is not None else len(payload.get("falhas") or []),
             "total_occurrences": len(payload.get("falhas") or []),
             "total_executed": run.get("total_executed") if run.get("total_executed") is not None else run.get("total_analisados"),
             "total_ai_groups": len(payload.get("agrupamentos_shadow") or payload.get("agrupamentos") or []),
+            "repository_url": run.get("repositorio_url"),
+            "repository_root": run.get("repositorio_raiz"),
+            "repository_revision": run.get("repositorio_revisao"),
             "created_at": run.get("created_at") or now,
             "updated_at": now,
         }
@@ -137,6 +153,8 @@ class SQLiteRepository:
                 evidence_by_occurrence_name,
             )
             self._import_run_delays(conn, payload)
+            self._import_testcase_times(conn, payload)
+            self._sync_mod_xml(conn, payload)
             expected = {
                 "occurrences": _unique_count(payload.get("falhas") or [], "id_falha"),
                 "evidence_files": _unique_count(payload.get("evidencias") or [], "id_evidencia"),
@@ -331,6 +349,25 @@ class SQLiteRepository:
             rows = conn.execute(sql, params).fetchall()
         return [run_api_row(row) for row in rows]
 
+    def latest_runs_by_module(self) -> list[dict[str, Any]]:
+        out = []
+        with self.connect() as conn:
+            modules = conn.execute("SELECT * FROM modules ORDER BY sort_order, name").fetchall()
+            for module in modules:
+                row = conn.execute(
+                    """
+                    SELECT r.*, m.slug AS module_slug, m.name AS module_name
+                    FROM runs r
+                    JOIN modules m ON m.id = r.module_id
+                    WHERE r.module_id = ?
+                    ORDER BY r.started_at DESC
+                    LIMIT 1
+                    """,
+                    (module["id"],),
+                ).fetchone()
+                out.append({"modulo": module_api_row(module), "rodagem": run_api_row(row) if row else None})
+        return out
+
     def run(self, run_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             row = conn.execute(
@@ -411,11 +448,27 @@ class SQLiteRepository:
             "status": latest["status"] if latest else "not_requested",
             "job_id": latest["id"] if latest else None,
             "model": latest["model"] if latest else None,
+            "created_at": latest["created_at"] if latest else None,
             "completed_at": latest["completed_at"] if latest else None,
             "error_message": latest["error_message"] if latest else None,
             "groups_count": groups_count,
             "grouped": bool(groups_count) and bool(latest and latest["status"] == "completed"),
         }
+
+    def expire_stale_ai_jobs(self, run_id: str, older_than_minutes: int) -> int:
+        with self.connect() as conn:
+            jobs = conn.execute(
+                "SELECT id, created_at FROM ai_analysis_jobs WHERE run_id = ? AND status = 'running'",
+                (run_id,),
+            ).fetchall()
+            stale_ids = [job["id"] for job in jobs if ai_job_is_stale(job["created_at"], older_than_minutes)]
+            for job_id in stale_ids:
+                conn.execute(
+                    "UPDATE ai_analysis_jobs SET status = 'failed', error_message = ?, completed_at = ? WHERE id = ? AND status = 'running'",
+                    (stale_ai_job_message(older_than_minutes), now_iso(), job_id),
+                )
+            conn.commit()
+        return len(stale_ids)
 
     def ai_grouping_debug(self, run_id: str) -> dict[str, Any]:
         with self.connect() as conn:
@@ -543,11 +596,55 @@ class SQLiteRepository:
 
     def performance(self, run_id: str) -> list[dict[str, Any]]:
         with self.connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM run_delays WHERE run_id = ? ORDER BY delay_seconds DESC, testcase_node_id",
-                (run_id,),
-            ).fetchall()
-        return [delay_api_row(row) for row in rows]
+            medicoes = [dict(r) for r in conn.execute("SELECT * FROM testcase_times WHERE run_id = ?", (run_id,)).fetchall()]
+            if not medicoes:
+                # Rodagem anterior aos tempos no banco: o que veio do C:\Tempos TC.
+                rows = conn.execute(
+                    "SELECT * FROM run_delays WHERE run_id = ? ORDER BY delay_seconds DESC, testcase_node_id",
+                    (run_id,),
+                ).fetchall()
+                return [delay_api_row(row) for row in rows]
+            casos = sorted({str(m["node_id"]) for m in medicoes})
+            marks = placeholders(casos)
+            bases = {r["id"]: dict(r) for r in conn.execute(f"SELECT * FROM testcase_time_bases WHERE id IN ({marks})", casos)}
+            historico = [dict(r) for r in conn.execute(
+                f"SELECT node_id, measured_at, seconds FROM testcase_times WHERE node_id IN ({marks})", casos)]
+            nomes = {r["node_id"]: r["node_name"] or "" for r in conn.execute(
+                f"SELECT node_id, node_name FROM testcase_hierarchy WHERE node_id IN ({marks})", casos)}
+        return tempos_casos.linhas_performance(run_id, medicoes, bases, historico, nomes)
+
+    def testcase_time_history(self, node_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            medicoes = [dict(r) for r in conn.execute("SELECT * FROM testcase_times WHERE node_id = ?", (node_id,))]
+            rodagens = [dict(r) for r in conn.execute("SELECT id, version, started_at FROM runs")]
+        return tempos_casos.historico_do_caso(node_id, medicoes, self.testcase_time_base(node_id), rodagens)
+
+    def testcase_time_base(self, node_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM testcase_time_bases WHERE id = ?", (node_id,)).fetchone()
+        return dict(row) if row else None
+
+    def save_testcase_time_base(self, row: dict[str, Any]) -> dict[str, Any]:
+        with self.connect() as conn:
+            upsert(conn, "testcase_time_bases", row, "id")
+        return self.testcase_time_base(str(row["id"])) or row
+
+    def import_testcase_times(self, bases: dict[str, int], medicoes: list[dict[str, Any]]) -> dict[str, int]:
+        """Carga inicial: base da planilha antiga (so onde ainda nao ha base) e o historico de medicoes."""
+        agora = now_iso()
+        rows = tempos_casos.linhas_medicao(medicoes, None, agora)
+        with self.connect() as conn:
+            for row in rows:
+                upsert(conn, "testcase_times", row, "id")
+            existentes = {r["id"] for r in conn.execute("SELECT id FROM testcase_time_bases")}
+            da_planilha = [
+                {"id": caso, "base_seconds": int(segundos), "origin": "planilha", "changed_at": agora}
+                for caso, segundos in bases.items() if caso not in existentes and int(segundos) > 0
+            ]
+            novas = tempos_casos.bases_novas(rows, existentes | {r["id"] for r in da_planilha}, agora)
+            for row in da_planilha + novas:
+                upsert(conn, "testcase_time_bases", row, "id")
+        return {"medicoes": len(rows), "bases_planilha": len(da_planilha), "bases_primeira_medicao": len(novas)}
 
     def testcase_hierarchy(self, module_slug: str | None = None) -> list[dict[str, Any]]:
         sql = """
@@ -584,11 +681,241 @@ class SQLiteRepository:
             rows = conn.execute("SELECT * FROM rerun_requests ORDER BY created_at DESC LIMIT 100").fetchall()
         return [dict(row) for row in rows]
 
-    def record_rerun_request(self, request: dict[str, Any]) -> dict[str, Any]:
+    def regravacao_requests(self, run_id: str | None = None) -> list[dict[str, Any]]:
         self.initialize()
+        sql = "SELECT * FROM regravacao_requests"
+        args: tuple[Any, ...] = ()
+        if run_id:
+            sql += " WHERE run_id = ?"
+            args = (run_id,)
+        with self.connect() as conn:
+            rows = conn.execute(sql + " ORDER BY created_at DESC LIMIT 200", args).fetchall()
+        return [_regravacao_from_row(row) for row in rows]
+
+    def regravacao_request(self, request_id: str) -> dict[str, Any] | None:
+        self.initialize()
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM regravacao_requests WHERE id = ?", (request_id,)).fetchone()
+        return _regravacao_from_row(row) if row else None
+
+    def save_regravacao_request(self, row: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        stored = {
+            **row,
+            "items_json": json.dumps(row.get("items_json") or [], ensure_ascii=False),
+            "result_json": json.dumps(row.get("result_json") or {}, ensure_ascii=False),
+        }
+        with self.connect() as conn:
+            upsert(conn, "regravacao_requests", stored, "id")
+            conn.commit()
+        return row
+
+    def bridge_requested_regravacoes(self) -> list[dict[str, Any]]:
+        self.initialize()
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM regravacao_requests WHERE status = 'solicitado' ORDER BY created_at"
+            ).fetchall()
+        return [_regravacao_from_row(row) for row in rows]
+
+    def claim_regravacao_request(self, request_id: str) -> bool:
+        self.initialize()
+        with self.connect() as conn:
+            changed = conn.execute(
+                "UPDATE regravacao_requests SET status = 'processando', updated_at = ? WHERE id = ? AND status = 'solicitado'",
+                (now_iso(), request_id),
+            ).rowcount
+            conn.commit()
+        return bool(changed)
+
+    def update_regravacao_request(self, request_id: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+        current = self.regravacao_request(request_id)
+        if not current:
+            return None
+        self.save_regravacao_request({**current, **fields, "updated_at": now_iso()})
+        return self.regravacao_request(request_id)
+
+    # ---- importacao de rodagem pelo dashboard (executada pelo RegravacaoBridge)
+
+    def import_requests(self, status: str | None = None) -> list[dict[str, Any]]:
+        self.initialize()
+        with self.connect() as conn:
+            if status:
+                rows = conn.execute("SELECT * FROM import_requests WHERE status = ? ORDER BY created_at", (status,)).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM import_requests ORDER BY created_at DESC LIMIT 50").fetchall()
+        return [dict(row) for row in rows]
+
+    def import_request(self, request_id: str) -> dict[str, Any] | None:
+        self.initialize()
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM import_requests WHERE id = ?", (request_id,)).fetchone()
+        return dict(row) if row else None
+
+    def save_import_request(self, row: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        with self.connect() as conn:
+            upsert(conn, "import_requests", row, "id")
+            conn.commit()
+        return row
+
+    def claim_import_request(self, request_id: str) -> dict[str, Any] | None:
+        self.initialize()
+        with self.connect() as conn:
+            changed = conn.execute(
+                "UPDATE import_requests SET status = 'processando', updated_at = ? WHERE id = ? AND status = 'solicitado'",
+                (now_iso(), request_id),
+            ).rowcount
+            conn.commit()
+        return self.import_request(request_id) if changed else None
+
+    def update_import_request(self, request_id: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+        current = self.import_request(request_id)
+        if not current:
+            return None
+        self.save_import_request({**current, **fields, "updated_at": now_iso()})
+        return self.import_request(request_id)
+
+    # ---- merge entre branches do TC (executado pelo MergeBridge)
+
+    def merge_requests(self) -> list[dict[str, Any]]:
+        self.initialize()
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM merge_requests ORDER BY created_at DESC LIMIT 100").fetchall()
+        return [_merge_from_row(row) for row in rows]
+
+    def merge_request(self, request_id: str) -> dict[str, Any] | None:
+        self.initialize()
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM merge_requests WHERE id = ?", (request_id,)).fetchone()
+        return _merge_from_row(row) if row else None
+
+    def save_merge_request(self, row: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        stored = {
+            **row,
+            "preview_json": json.dumps(row.get("preview_json") or {}, ensure_ascii=False),
+            "result_json": json.dumps(row.get("result_json") or {}, ensure_ascii=False),
+        }
+        with self.connect() as conn:
+            upsert(conn, "merge_requests", stored, "id")
+            conn.commit()
+        return row
+
+    def merge_requests_by_status(self, statuses: tuple[str, ...]) -> list[dict[str, Any]]:
+        self.initialize()
+        marks = ",".join("?" for _ in statuses)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM merge_requests WHERE status IN ({marks}) ORDER BY created_at", statuses
+            ).fetchall()
+        return [_merge_from_row(row) for row in rows]
+
+    def claim_merge_request(self, request_id: str) -> bool:
+        self.initialize()
+        with self.connect() as conn:
+            changed = conn.execute(
+                "UPDATE merge_requests SET updated_at = ?, status = CASE status "
+                "WHEN 'previa_solicitada' THEN 'previa_processando' ELSE 'processando' END "
+                "WHERE id = ? AND status IN ('previa_solicitada', 'solicitado')",
+                (now_iso(), request_id),
+            ).rowcount
+            conn.commit()
+        return bool(changed)
+
+    def update_merge_request(self, request_id: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+        current = self.merge_request(request_id)
+        if not current:
+            return None
+        self.save_merge_request({**current, **fields, "updated_at": now_iso()})
+        return self.merge_request(request_id)
+
+    def merge_branches(self) -> dict[str, Any]:
+        self.initialize()
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM svn_branch_cache WHERE id = 'atual'").fetchone()
+        if not row:
+            return {"branches": [], "updated_at": None}
+        try:
+            branches = json.loads(row["branches_json"] or "[]")
+        except json.JSONDecodeError:
+            branches = []
+        return {"branches": branches, "updated_at": row["updated_at"]}
+
+    def save_merge_branches(self, branches: list[dict[str, Any]]) -> dict[str, Any]:
+        self.initialize()
+        row = {"id": "atual", "branches_json": json.dumps(branches, ensure_ascii=False), "updated_at": now_iso()}
+        with self.connect() as conn:
+            upsert(conn, "svn_branch_cache", row, "id")
+            conn.commit()
+        return {"branches": branches, "updated_at": row["updated_at"]}
+
+    def run_presets(self) -> list[dict[str, Any]]:
+        self.initialize()
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM run_presets ORDER BY name").fetchall()
+        return [_preset_from_row(row) for row in rows]
+
+    def run_preset(self, preset_id: str) -> dict[str, Any] | None:
+        self.initialize()
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM run_presets WHERE id = ?", (preset_id,)).fetchone()
+        return _preset_from_row(row) if row else None
+
+    def save_run_preset(self, row: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        stored = {**row, "config_json": json.dumps(row.get("config_json") or {}, ensure_ascii=False)}
+        with self.connect() as conn:
+            upsert(conn, "run_presets", stored, "id")
+            conn.commit()
+        return row
+
+    def delete_run_preset(self, preset_id: str) -> bool:
+        self.initialize()
+        with self.connect() as conn:
+            deleted = conn.execute("DELETE FROM run_presets WHERE id = ?", (preset_id,)).rowcount
+            conn.commit()
+        return bool(deleted)
+
+    # ---- casos de teste desativados no dashboard (so visual)
+
+    def testcase_disabled(self, module_slug: str | None = None) -> list[dict[str, Any]]:
+        self.initialize()
+        sql, params = "SELECT * FROM testcase_disabled", []
+        if module_slug:
+            sql, params = sql + " WHERE module_slug = ?", [module_slug]
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(sql + " ORDER BY node_id", params).fetchall()]
+
+    def testcase_disabled_item(self, node_id: str) -> dict[str, Any] | None:
+        self.initialize()
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM testcase_disabled WHERE id = ?", (node_id,)).fetchone()
+        return dict(row) if row else None
+
+    def save_testcase_disabled(self, row: dict[str, Any]) -> dict[str, Any]:
+        self.initialize()
+        with self.connect() as conn:
+            upsert(conn, "testcase_disabled", row, "id")
+            conn.commit()
+        return row
+
+    def delete_testcase_disabled(self, node_id: str) -> bool:
+        self.initialize()
+        with self.connect() as conn:
+            deleted = conn.execute("DELETE FROM testcase_disabled WHERE id = ?", (node_id,)).rowcount
+            conn.commit()
+        return bool(deleted)
+
+    def record_rerun_request(self, request: dict[str, Any], *, requested_by: str | None = None) -> dict[str, Any]:
+        self.initialize()
+        request_id = str(request.get("id") or "").strip() or str(uuid.uuid4())
+        with self.connect() as conn:
+            if conn.execute("SELECT 1 FROM rerun_requests WHERE id = ?", (request_id,)).fetchone():
+                return rerun_request_conflict(request_id)
         now = now_iso()
         row = {
-            "id": request.get("id") or str(uuid.uuid4()),
+            "id": request_id,
             "source_run_id": request.get("source_run_id") or request.get("fk_rodagem"),
             "vm_name": request.get("vm_name") or "",
             "version": request.get("version") or request.get("versao") or "",
@@ -597,11 +924,11 @@ class SQLiteRepository:
             "parallel": request.get("parallel") or request.get("paralelo"),
             "ct_desmarcar": request.get("ct_desmarcar"),
             "branch": request.get("branch"),
-            "requested_by": request.get("requested_by") or request.get("solicitado_por"),
+            "requested_by": requested_by or request.get("requested_by") or request.get("solicitado_por"),
             "request_type": request.get("request_type") or request.get("tipo_solicitacao") or "manual",
             "configuration_mode": request.get("configuration_mode") or request.get("modo_configuracao") or "api",
             "config_json": json.dumps(request, ensure_ascii=False),
-            "status": request.get("status") or "requested",
+            "status": new_rerun_request_status(request.get("status")),
             "jenkins_queue_url": None,
             "jenkins_build_url": None,
             "jenkins_build_number": None,
@@ -615,6 +942,12 @@ class SQLiteRepository:
             upsert(conn, "rerun_requests", row, "id")
             conn.commit()
         return row
+
+    def rerun_request(self, request_id: str) -> dict[str, Any] | None:
+        self.initialize()
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM rerun_requests WHERE id = ?", (request_id,)).fetchone()
+        return dict(row) if row else None
 
     def cancel_rerun_request(self, request_id: str, request: dict[str, Any] | None = None) -> dict[str, Any] | None:
         self.initialize()
@@ -673,6 +1006,7 @@ class SQLiteRepository:
                 "script_name": source.get("script_name") or "",
                 "procedure_name": source.get("procedure_name") or "",
                 "mds_path": source.get("mds_path") or "",
+                "description": str(source.get("description") or "").strip(),
                 "created_at": source.get("created_at") or now,
                 "updated_at": now,
             }
@@ -843,6 +1177,42 @@ class SQLiteRepository:
             written += 1
         return written
 
+    def _sync_mod_xml(self, conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
+        """Desativados pelo mod_xml.py: entram os da lista, saem os que foram tirados dela.
+        Os marcados a mao nao mudam. Sem a lista no payload (VM antiga, arquivo nao lido), nada muda."""
+        lista = payload.get("casos_desmarcados_mod_xml")
+        if not isinstance(lista, dict) or not isinstance(lista.get("casos"), list):
+            return
+        casos = [str(c) for c in lista["casos"]]
+        texto = mod_xml_motivo(lista.get("exceto_vms") or [])
+        atuais = {r["id"] for r in conn.execute("SELECT id FROM testcase_disabled WHERE disabled_by = ?", (MOD_XML_AUTOR,))}
+        for sobra in atuais - set(casos):
+            conn.execute("DELETE FROM testcase_disabled WHERE id = ?", (sobra,))
+        agora = now_iso()
+        for caso in casos:
+            if caso in atuais:
+                conn.execute("UPDATE testcase_disabled SET reason = ? WHERE id = ?", (texto, caso))
+            elif not conn.execute("SELECT 1 FROM testcase_disabled WHERE id = ?", (caso,)).fetchone():
+                upsert(conn, "testcase_disabled", {"id": caso, "node_id": caso, "module_slug": module_of_node(caso) or None,
+                                                    "reason": texto, "disabled_by": MOD_XML_AUTOR, "disabled_at": agora}, "id")
+
+    def _fim_ja_gravado(self, run_id: str) -> Any:
+        with self.connect() as conn:
+            row = conn.execute("SELECT finished_at FROM runs WHERE id = ?", (run_id,)).fetchone()
+        return row["finished_at"] if row else None
+
+    def _import_testcase_times(self, conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
+        """Tempos dos casos desta rodagem; caso ainda sem base ganha a primeira medicao como base."""
+        rows = tempos_casos.linhas_medicao(payload.get("tempos_casos") or [], payload["rodagem"]["id_rodagem"], now_iso())
+        for row in rows:
+            upsert(conn, "testcase_times", row, "id")
+        casos = sorted({r["node_id"] for r in rows})
+        if not casos:
+            return
+        existentes = {r["id"] for r in conn.execute(f"SELECT id FROM testcase_time_bases WHERE id IN ({placeholders(casos)})", casos)}
+        for row in tempos_casos.bases_novas(rows, existentes, now_iso()):
+            upsert(conn, "testcase_time_bases", row, "id")
+
     def _import_run_delays(self, conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
         run_id = payload["rodagem"]["id_rodagem"]
         module_id = payload["modulo"]["id_modulo"]
@@ -860,6 +1230,35 @@ class SQLiteRepository:
                 "created_at": source.get("created_at") or now_iso(),
             }
             upsert(conn, "run_delays", row, "id")
+
+
+def _regravacao_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    out = dict(row)
+    for key, empty in (("items_json", []), ("result_json", {})):
+        try:
+            out[key] = json.loads(out.get(key) or json.dumps(empty))
+        except json.JSONDecodeError:
+            out[key] = empty
+    return out
+
+
+def _merge_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    out = dict(row)
+    for key in ("preview_json", "result_json"):
+        try:
+            out[key] = json.loads(out.get(key) or "{}")
+        except json.JSONDecodeError:
+            out[key] = {}
+    return out
+
+
+def _preset_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    out = dict(row)
+    try:
+        out["config_json"] = json.loads(out.get("config_json") or "{}")
+    except json.JSONDecodeError:
+        out["config_json"] = {}
+    return out
 
 
 def upsert(conn: sqlite3.Connection, table: str, row: dict[str, Any], pk: str) -> None:
@@ -1088,6 +1487,7 @@ def hierarchy_api_row(row: sqlite3.Row) -> dict[str, Any]:
         **data,
         "modulo_codigo": data["module_code"],
         "modulo_nome": data["module_name"],
+        "descricao": data.get("description") or "",
         "node_type": "grupo" if data["node_type"] == "group" else "caso",
         "full_path_ids": json_value(data["full_path_ids_json"], []),
         "full_path_names": json_value(data["full_path_names_json"], []),
@@ -1264,12 +1664,50 @@ def json_value(value: Any, default: Any) -> Any:
     return json.loads(value)
 
 
+def ai_job_is_stale(created_at: object, older_than_minutes: int) -> bool:
+    # Job "running" mais antigo que o limite foi interrompido (ex.: reinicio da API)
+    # e nao vai mais terminar sozinho.
+    if isinstance(created_at, datetime):
+        created = created_at
+    else:
+        try:
+            created = datetime.fromisoformat(str(created_at or "").replace("Z", "+00:00"))
+        except ValueError:
+            return True
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return created <= datetime.now(timezone.utc) - timedelta(minutes=older_than_minutes)
+
+
+def stale_ai_job_message(older_than_minutes: int) -> str:
+    return f"Agrupamento interrompido: job ficou em processamento por mais de {older_than_minutes} minutos."
+
+
+NEW_RERUN_REQUEST_STATUSES = ("requested", "solicitado")
+
+
+def new_rerun_request_status(value: object) -> str:
+    # Um pedido novo so pode nascer em um estado que o JenkinsBridge processa;
+    # os demais estados sao definidos pelo Bridge ou pelo cancelamento.
+    status = str(value or "").strip().lower()
+    return status if status in NEW_RERUN_REQUEST_STATUSES else "requested"
+
+
+def rerun_request_conflict(request_id: str) -> dict[str, Any]:
+    return {
+        "error": "rerun_request_already_exists",
+        "id": request_id,
+        "message": "Ja existe uma solicitacao com este id.",
+    }
+
+
 def rerun_request_is_terminal(row: dict[str, Any]) -> bool:
     terminal = {
         "cancelado",
         "finalizado",
         "finalizado_sucesso",
         "finalizado_falha",
+        "finalizado_ocorrencias",
         "erro",
         "erro_envio",
     }

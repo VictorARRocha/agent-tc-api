@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import re
+import threading
+from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 from .storage import DEFAULT_BUCKET, storage_from_env
+from .tempos_casos import TENDENCIA_RODAGENS
 from .canonical_repository import (
     CanonicalRepository,
     DEFAULT_ENV,
@@ -50,19 +53,11 @@ class PostgresRepository(CanonicalRepository):
             default_provider="local",
         )
         self.bucket = self.storage.bucket
-        self.plan: dict[str, Any] = {
-            "dry_run": dry_run,
-            "backend": "postgres",
-            "schema": self.schema,
-            "table_prefix": self.table_prefix,
-            "bucket": self.bucket,
-            "storage_provider": self.storage.provider,
-            "upserts": {},
-            "uploads": 0,
-            "skipped_evidence": 0,
-            "upload_errors": [],
-            "deduplicated_rows": {},
-        }
+        self.plan: dict[str, Any] = self._new_plan()
+        self._initialized = False
+        # A API atende requisicoes em threads com a mesma instancia; a conexao
+        # de uma importacao em andamento pertence somente a thread que a abriu.
+        self._local = threading.local()
         if not self.dsn:
             raise ValueError("POSTGRES_DSN ou DATABASE_URL nao configurado para --backend postgres")
 
@@ -80,6 +75,7 @@ class PostgresRepository(CanonicalRepository):
             conn.close()
         self.storage.initialize()
         self.seed_modules()
+        self._initialized = True
 
     def connect(self):
         try:
@@ -91,8 +87,48 @@ class PostgresRepository(CanonicalRepository):
             ) from exc
         return psycopg.connect(self.dsn, row_factory=dict_row)
 
+    def _transaction_connection(self):
+        local = getattr(self, "_local", None)
+        return getattr(local, "conn", None) if local is not None else None
+
+    @contextmanager
+    def _cursor(self):
+        conn = self._transaction_connection()
+        if conn is not None:
+            with conn.cursor() as cursor:
+                yield cursor
+            return
+        conn = self.connect()
+        try:
+            with conn.cursor() as cursor:
+                yield cursor
+            conn.commit()
+        finally:
+            conn.close()
+
+    @contextmanager
+    def _import_scope(self):
+        """Todas as escritas da importacao em uma unica transacao: ou entra tudo, ou nada."""
+        if self.dry_run or self._transaction_connection() is not None:
+            yield
+            return
+        conn = self.connect()
+        self._local.conn = conn
+        try:
+            yield
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            self._local.conn = None
+            conn.close()
+
     def import_payload(self, payload: dict[str, Any], source: str = "payload") -> dict[str, Any]:
-        self.initialize()
+        # Migrations so na primeira vez do processo (a API ja inicializa ao subir): rodar o DDL a cada
+        # envio pega lock exclusivo nas tabelas e dois envios ao mesmo tempo podiam se travar.
+        if not self._initialized:
+            self.initialize()
         result = super().import_payload(payload, source)
         result["backend"] = "postgres"
         result["schema"] = self.schema
@@ -133,13 +169,8 @@ class PostgresRepository(CanonicalRepository):
                 f"ON CONFLICT ({', '.join(_ident(column) for column in conflict_columns)}) {conflict_sql}"
             )
             values = [tuple(_pg_value(row.get(column)) for column in columns) for row in chunk]
-            conn = self.connect()
-            try:
-                with conn.cursor() as cursor:
-                    cursor.executemany(sql, values)
-                conn.commit()
-            finally:
-                conn.close()
+            with self._cursor() as cursor:
+                cursor.executemany(sql, values)
 
     def _select(self, table: str, params: dict[str, str] | None = None) -> list[dict[str, Any]]:
         params = params or {}
@@ -158,13 +189,9 @@ class PostgresRepository(CanonicalRepository):
             sql += " OFFSET %s"
             values.append(int(params["offset"]))
 
-        conn = self.connect()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute(sql, values)
-                return [_json_ready_row(dict(row)) for row in cursor.fetchall()]
-        finally:
-            conn.close()
+        with self._cursor() as cursor:
+            cursor.execute(sql, values)
+            return [_json_ready_row(dict(row)) for row in cursor.fetchall()]
 
     def _select_all(
         self,
@@ -181,13 +208,8 @@ class PostgresRepository(CanonicalRepository):
         where_sql, values = _where_from_params(params)
         if not where_sql:
             raise ValueError("DELETE sem filtro bloqueado no PostgresRepository")
-        conn = self.connect()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute(f"DELETE FROM {self._qualified_table(table)} WHERE {where_sql}", values)
-            conn.commit()
-        finally:
-            conn.close()
+        with self._cursor() as cursor:
+            cursor.execute(f"DELETE FROM {self._qualified_table(table)} WHERE {where_sql}", values)
 
     def _patch_with_in(self, table: str, column: str, values: list[str], body: dict[str, Any]) -> None:
         if self.dry_run:
@@ -228,25 +250,31 @@ class PostgresRepository(CanonicalRepository):
         update_values = [_pg_value(body[column]) for column in columns]
         if returning:
             sql += " RETURNING *"
-        conn = self.connect()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute(sql, update_values + values)
-                rows = [_json_ready_row(dict(row)) for row in cursor.fetchall()] if returning else None
-            conn.commit()
-            return rows
-        finally:
-            conn.close()
+        with self._cursor() as cursor:
+            cursor.execute(sql, update_values + values)
+            return [_json_ready_row(dict(row)) for row in cursor.fetchall()] if returning else None
+
+    def _ultimas_medicoes(self, casos: list[str], ate: Any) -> list[dict[str, Any]]:
+        """So as ultimas medicoes de cada caso ate a rodagem (o historico tem centenas por caso)."""
+        if not casos:
+            return []
+        sql = (
+            "SELECT node_id, measured_at, seconds FROM ("
+            " SELECT node_id, measured_at, seconds,"
+            " row_number() OVER (PARTITION BY node_id ORDER BY measured_at DESC) AS posicao"
+            f" FROM {self._qualified_table('testcase_times')}"
+            " WHERE node_id = ANY(%s) AND measured_at <= %s"
+            ") ultimas WHERE posicao <= %s"
+        )
+        with self._cursor() as cursor:
+            cursor.execute(sql, (casos, ate, TENDENCIA_RODAGENS))
+            return [dict(row) for row in cursor.fetchall()]
 
     def auth_user_count(self) -> int:
-        conn = self.connect()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute(f"SELECT count(*) AS count FROM {self._qualified_table('app_users')}")
-                row = cursor.fetchone()
-                return int(row["count"] if row else 0)
-        finally:
-            conn.close()
+        with self._cursor() as cursor:
+            cursor.execute(f"SELECT count(*) AS count FROM {self._qualified_table('app_users')}")
+            row = cursor.fetchone()
+            return int(row["count"] if row else 0)
 
     def auth_user_by_username(self, username_normalized: str) -> dict[str, Any] | None:
         rows = self._select("app_users", {"username_normalized": "eq." + username_normalized, "limit": "1"})

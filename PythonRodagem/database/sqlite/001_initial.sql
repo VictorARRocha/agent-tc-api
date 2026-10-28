@@ -247,5 +247,118 @@ CREATE TABLE IF NOT EXISTS rerun_requests (
 CREATE INDEX IF NOT EXISTS idx_rerun_requests_status ON rerun_requests(status);
 CREATE INDEX IF NOT EXISTS idx_rerun_requests_created ON rerun_requests(created_at DESC);
 
+CREATE TABLE IF NOT EXISTS run_presets (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  created_by TEXT,
+  updated_by TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_presets_mode ON run_presets(mode);
+
+CREATE TABLE IF NOT EXISTS regravacao_requests (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  status TEXT NOT NULL,
+  requested_by TEXT,
+  repository_url TEXT NOT NULL,
+  repository_root TEXT,
+  commit_message TEXT,
+  items_json TEXT NOT NULL DEFAULT '[]',
+  result_json TEXT NOT NULL DEFAULT '{}',
+  svn_revision TEXT,
+  error_message TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  finished_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_regravacao_requests_status ON regravacao_requests(status);
+CREATE INDEX IF NOT EXISTS idx_regravacao_requests_run ON regravacao_requests(run_id);
+
+CREATE TABLE IF NOT EXISTS import_requests (
+  id TEXT PRIMARY KEY,
+  status TEXT NOT NULL,
+  requested_by TEXT,
+  run_folder TEXT NOT NULL,
+  vm TEXT,
+  branch_url TEXT,
+  exit_code INTEGER,
+  output TEXT,
+  error_message TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  finished_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_import_requests_status ON import_requests(status);
+
+CREATE TABLE IF NOT EXISTS merge_requests (
+  id TEXT PRIMARY KEY,
+  status TEXT NOT NULL,
+  requested_by TEXT,
+  source_url TEXT NOT NULL,
+  source_name TEXT,
+  target_url TEXT NOT NULL,
+  target_name TEXT,
+  target_kind TEXT,
+  commit_message TEXT,
+  preview_json TEXT NOT NULL DEFAULT '{}',
+  result_json TEXT NOT NULL DEFAULT '{}',
+  svn_revision TEXT,
+  error_message TEXT,
+  confirmed_by TEXT,
+  confirmed_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  finished_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_merge_requests_status ON merge_requests(status);
+
+CREATE TABLE IF NOT EXISTS svn_branch_cache (
+  id TEXT PRIMARY KEY,
+  branches_json TEXT NOT NULL DEFAULT '[]',
+  updated_at TEXT NOT NULL
+);
+
+-- Casos de teste marcados como desativados no dashboard (so visual: nome riscado na lista).
+CREATE TABLE IF NOT EXISTS testcase_disabled (
+  id TEXT PRIMARY KEY,
+  node_id TEXT NOT NULL,
+  module_slug TEXT,
+  reason TEXT,
+  disabled_by TEXT,
+  disabled_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_testcase_disabled_module ON testcase_disabled(module_slug);
+
+-- Tempo de cada caso de teste: medicoes por inicio de rodagem e tempo base por caso.
+CREATE TABLE IF NOT EXISTS testcase_times (
+  id TEXT PRIMARY KEY,
+  node_id TEXT NOT NULL,
+  measured_at TEXT NOT NULL,
+  seconds INTEGER NOT NULL,
+  run_id TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_testcase_times_node ON testcase_times(node_id);
+CREATE INDEX IF NOT EXISTS idx_testcase_times_run ON testcase_times(run_id);
+
+CREATE TABLE IF NOT EXISTS testcase_time_bases (
+  id TEXT PRIMARY KEY,
+  base_seconds INTEGER NOT NULL,
+  origin TEXT NOT NULL,
+  previous_seconds INTEGER,
+  changed_by TEXT,
+  changed_at TEXT NOT NULL
+);
+
 INSERT OR IGNORE INTO schema_migrations(version, applied_at)
 VALUES ('001_initial', datetime('now'));

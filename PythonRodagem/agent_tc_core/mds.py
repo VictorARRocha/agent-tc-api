@@ -21,7 +21,14 @@ class CaseInfo:
     procedure_name: str
 
 
-NODE_RE = re.compile(r"^[^\[]*\[(?P<id>\d+(?:\.\d+)*)\]\s*(?P<name>.*)$")
+# O Practice tem espaco dentro do colchete ("[19.0.2.1.17 ]") e nome com quebra de linha.
+NODE_RE = re.compile(r"^[^\[]*\[\s*(?P<id>\d+(?:\.\d+)*)\s*\]\s*(?P<name>.*)$", re.DOTALL)
+# Separador depois do id: "[19.0.1.1] - Conferencia" vira "Conferencia".
+_NOME_SEPARADOR_RE = re.compile(r"^[-\u2013\s]+")
+
+
+def _clean_node_name(name: str) -> str:
+    return _NOME_SEPARADOR_RE.sub("", " ".join(name.split()))
 
 
 def module_for_node_id(node_id: str) -> dict[str, str]:
@@ -59,7 +66,7 @@ class MdsIndex:
             current_stack = stack
             if match:
                 node_id = match.group("id")
-                node_name = (match.group("name").strip() or raw_name).strip()
+                node_name = _clean_node_name(match.group("name")) or " ".join(raw_name.split())
                 parent = stack[-1]["node_id"] if stack else None
                 path_ids = [item["node_id"] for item in stack] + [node_id]
                 path_names = [item["node_name"] for item in stack] + [node_name]
@@ -149,7 +156,7 @@ class MdsIndex:
 
     def hierarchy_rows(self) -> list[dict[str, object]]:
         return [
-            {key: value for key, value in row.items() if key not in {"description", "testMoniker"}}
+            {key: value for key, value in row.items() if key != "testMoniker"}
             for row in self.by_id.values()
         ]
 
@@ -200,6 +207,19 @@ def split_mds_paths(value: str | Path | list[str | Path] | tuple[str | Path, ...
     else:
         raw_items = re.split(r"[;|]", str(value))
     return [Path(item.strip().strip('"')) for item in raw_items if item.strip()]
+
+
+def mds_do_projeto_da_pasta(mds_paths: list[Path], run_folder: str | Path) -> Path:
+    """O .mds do projeto que gerou a pasta (dele vem a origem SVN usada na regravacao).
+
+    Practice: a Base Individual e outro projeto, com outro Stores, que a Base Agrupada;
+    as duas rodagens recebem a mesma lista de .mds.
+    """
+    if "practice base individual" in Path(run_folder).name.lower():
+        for path in mds_paths:
+            if "individua" in path.name.lower():
+                return path
+    return mds_paths[0]
 
 
 def infer_system_from_mds_paths(paths: list[Path]) -> str:

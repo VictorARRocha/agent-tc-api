@@ -1,46 +1,47 @@
-# AgenteTC
+# Agent TC
 
-Projeto do Agent TC para substituir o pos-processamento manual do Codex CLI por Python.
+O Agent TC transforma os resultados das rodadas automatizadas do TestComplete em
+dados consultaveis. Ele le compactados e projetos MDS/PJS, registra rodagens,
+falhas, evidencias e tempos, permite agrupar falhas com IA e envia solicitacoes
+de novas execucoes ao Jenkins.
 
-## Estrutura
+## Como o sistema esta distribuido
 
-- `API/`: scripts, Dockerfile e deploy da API consumida pelo dashboard.
-- `JenkinsBridge/`: bridge que le pedidos da API e aciona Jenkins.
-- `PythonRodagem/`: pos-rodagem em Python, parser de compactados, leitura de MDS/PJS, persistencia e migrations.
-  - `agent_tc_core/`: pacote principal Python.
-  - `cli/`: comandos Python de operacao.
-  - `database/`: scripts SQL do modelo canonico.
-  - `tests/`: testes de regressao e comportamento do pipeline.
-- `docs/`: documentacao de setup, banco, API, deploy e historico do projeto.
+```text
+Usuarios -> dashboard/Caddy -> API -> PostgreSQL + volume de evidencias
+VMs de rodagem -> PythonRodagem -> Caddy -> API
+JenkinsBridge -> Caddy -> API
+JenkinsBridge -> Jenkins
+```
 
-## Entradas principais
+Na D01, o dashboard e a entrada publica na porta `8000`. A API usa a porta
+`8001` do host; o PostgreSQL usa apenas a rede Docker. O acesso externo
+temporario e `http://SEU_SUBDOMINIO.duckdns.org:10443`, por NAT para a porta `8000`
+da D01. O acesso interno e `http://192.168.9.201:8000`. O dashboard e mantido
+em outro repositorio, `tczinho`, e publicado na D01 pelo container `agent-tc-web`.
 
-- `PythonRodagem/run_agent_tc_python.bat`: deve ser chamado no pos-rodagem para processar a pasta mais recente da VM ou uma pasta informada.
-- `API/run_agent_tc_api.bat`: sobe a API em `0.0.0.0:8000` fora do Docker.
-- `API/start_agent_tc_api_hidden.vbs`: inicia a API escondida na VM que hospeda o Bridge.
-- Wrappers com os nomes antigos continuam na raiz para compatibilidade.
+## Pastas
 
-## Modo recomendado na SCI
+| Pasta | Responsabilidade |
+| --- | --- |
+| `API/` | Imagem Docker, Compose e entrada da API central. |
+| `PythonRodagem/` | Leitura das rodadas, modelo de dados, API Python, migrations e testes. |
+| `JenkinsBridge/` | Consulta pedidos na API, aciona e acompanha o Jenkins. |
+| `docs/` | Arquitetura, configuracao, operacao e modelo de dados. |
 
-Para manter o PostgreSQL fechado na rede, as VMs devem usar `AGENT_TC_BACKEND=api`.
-Nesse modo, a VM analisa a rodagem localmente, envia o payload e as evidencias para `AGENT_TC_API_URL`, e somente a API central grava no PostgreSQL/storage.
-Use `AGENT_TC_BACKEND=postgres` apenas em teste controlado ou quando a infra decidir expor o banco conscientemente.
+Os atalhos na raiz encaminham para os scripts das subpastas e existem para
+compatibilidade com chamadas antigas. O codigo da API fica em
+`PythonRodagem/agent_tc_core`; a pasta `API/` nao duplica esse pacote.
 
-## Auth local
+## Onde comecar
 
-A API oferece Auth local no PostgreSQL:
+- [Arquitetura e funcionamento](docs/ARQUITETURA.md): objetivos, fluxos e hospedagem.
+- [Configuracao](docs/CONFIGURACAO.md): os quatro arquivos `.env` e seus valores.
+- [Operacao da D01](docs/OPERACAO_D01.md): verificacao, atualizacao e manutencao.
+- [Modelo de dados](docs/CANONICAL_DATA_MODEL.md): tabelas e migrations.
+- [Deploy da API](API/deploy/d01/DEPLOY_D01_DOCKER.md): referencia curta para o Compose da API.
 
-- `POST /auth/register`
-- `POST /auth/login`
-- `POST /auth/logout`
-- `GET /auth/me`
-- `GET /auth/users`
-- `PATCH /auth/users/{id}`
-
-O primeiro cadastro vira admin aprovado automaticamente para bootstrap. As senhas sao salvas somente como hash PBKDF2 no PostgreSQL.
-
-## Documentacao
-
-- `API/deploy/d01/DEPLOY_D01_DOCKER.md`: guia operacional atual para API + PostgreSQL + storage local na D01.
-- `docs/RESUMO_MIGRACAO_5_ETAPAS.md`: resumo atual da migracao para API, PostgreSQL, storage local, Bridge e Auth local.
-- `docs/CANONICAL_DATA_MODEL.md`: modelo canonico do banco.
+`C:\TC\Util Compartilhado\AgenteTC` e uma copia operacional do repositorio
+`agent-tc-api`, nao um clone Git. Segredos reais ficam nos arquivos `.env`
+locais e nao devem entrar no repositorio. O dashboard tem seu proprio Git e
+deploy em `C:\TC\AgentTC-Dashboard` na D01.

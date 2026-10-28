@@ -49,8 +49,59 @@ class FailureAnalysis:
     evidences: list[EvidenceCandidate]
 
 
+REGRAVACAO_MANIFEST = "regravacao.txt"
+# Manifesto da rodagem inteira, gravado pelo TC (oculto) na pasta dos .rar, para nao aparecer dentro do log
+# compactado de cada caso: <nome do .rar sem extensao>|<arquivo _Atual>|<caminho da base>|<S/N>.
+RUN_REGRAVACAO_MANIFEST = "AgenteTC_Regravacao.txt"
+
+
+def read_regravacao_manifest(files: list[Path]) -> dict[str, dict[str, object]]:
+    """Le o Regravacao.txt gravado pelo TC (pCompararArquivos) quando ha diferenca.
+
+    Cada linha: <arquivo _Atual>|<caminho da base relativo a Stores>|<S/N caminho confirmado>.
+    Devolve {nome do _Atual em minusculas: {"caminho_base", "confirmado"}}; sem manifesto, {}.
+    """
+    out: dict[str, dict[str, object]] = {}
+    for path in files:
+        if path.name.lower() != REGRAVACAO_MANIFEST:
+            continue
+        text, _ = read_text_fallback(path)
+        for raw in text.splitlines():
+            parts = [part.strip() for part in raw.replace("\ufeff", "").split("|")]
+            if len(parts) != 3 or not parts[0] or not parts[1]:
+                continue
+            out[parts[0].lower()] = {
+                "caminho_base": parts[1],
+                "confirmado": parts[2].upper() == "S",
+            }
+    return out
+
+
+def read_run_regravacao_manifest(run_folder: Path) -> dict[str, dict[str, dict[str, object]]]:
+    """Le o AgenteTC_Regravacao.txt da pasta da rodagem: {nome do .rar: {nome do _Atual: entrada}}.
+
+    Linha repetida (o TC grava de novo a cada diferenca) vale a ultima. Sem o arquivo, {}.
+    """
+    out: dict[str, dict[str, dict[str, object]]] = {}
+    path = Path(run_folder) / RUN_REGRAVACAO_MANIFEST
+    if not path.is_file():
+        return out
+    text, _ = read_text_fallback(path)
+    for raw in text.splitlines():
+        parts = [part.strip() for part in raw.replace("\ufeff", "").split("|")]
+        if len(parts) != 4 or not all(parts[:3]):
+            continue
+        out.setdefault(parts[0].lower(), {})[parts[1].lower()] = {
+            "caminho_base": parts[2],
+            "confirmado": parts[3].upper() == "S",
+        }
+    return out
+
+
 def _comparison_side(path: Path) -> tuple[str | None, str | None]:
-    stem = path.stem.lower()
+    # Com extensao de texto o marcador fica antes dela (Relatorio_Atual.txt); sem extensao, no fim
+    # do nome (o Suprema grava "ApuracaoReinf200862_Atual").
+    stem = path.stem.lower() if path.suffix.lower() in TEXT_EXTENSIONS else path.name.lower()
     for marker in BASE_MARKERS:
         if stem.endswith(marker):
             return stem[: -len(marker)], "base"
@@ -60,18 +111,32 @@ def _comparison_side(path: Path) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _texto_sem_extensao(path: Path) -> bool:
+    """Arquivo de comparacao sem extensao (o nome termina no marcador) e com conteudo de texto."""
+    nome = path.name.lower()
+    if not nome.endswith(BASE_MARKERS + CURRENT_MARKERS):
+        return False
+    try:
+        with path.open("rb") as arquivo:
+            return b"\0" not in arquivo.read(8192)
+    except OSError:
+        return False
+
+
 def find_comparisons(files: list[Path]) -> list[Comparison]:
-    grouped: dict[str, dict[str, Path]] = {}
+    # Par = mesma pasta + mesmo nome: dois relatorios com o mesmo nome em pastas diferentes
+    # (ex.: uma por empresa) eram juntados e um deles sumia.
+    grouped: dict[tuple[str, str], dict[str, Path]] = {}
     for path in files:
-        if path.suffix.lower() not in TEXT_EXTENSIONS:
+        if path.suffix.lower() not in TEXT_EXTENSIONS and not _texto_sem_extensao(path):
             continue
         key, side = _comparison_side(path)
         if not key or not side:
             continue
-        grouped.setdefault(key, {})[side] = path
+        grouped.setdefault((str(path.parent).lower(), key), {})[side] = path
 
     comparisons: list[Comparison] = []
-    for key, pair in sorted(grouped.items()):
+    for (_pasta, key), pair in sorted(grouped.items()):
         if "base" in pair and "atual" in pair:
             comparisons.append(
                 Comparison(
@@ -126,10 +191,17 @@ def analyze_failure(
     archive: ArchiveInfo,
     extracted_dir: Path,
     case_info: CaseInfo,
+    run_manifest: dict[str, dict[str, object]] | None = None,
 ) -> FailureAnalysis:
     files = [path for path in extracted_dir.rglob("*") if path.is_file()]
     info_errors = [path for path in files if path.name.lower() in ERROR_FILE_NAMES]
     comparisons = find_comparisons(files)
+    # Formato antigo (Regravacao.txt dentro do .rar) e o novo (linhas deste .rar no manifesto da rodagem).
+    manifest = {**read_regravacao_manifest(files), **(run_manifest or {})}
+    for comparison in comparisons:
+        entry = manifest.get(comparison.atual.name.lower())
+        if entry:
+            comparison.resumo["regravacao"] = entry
     has_info_error = bool(info_errors)
     has_comparison = bool(comparisons)
 

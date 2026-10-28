@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import zipfile
@@ -23,7 +24,7 @@ class ArchiveInfo:
 
 
 class ArchiveExtractionError(RuntimeError):
-    def __init__(self, archive: ArchiveInfo, target: Path, returncode: int, output: str):
+    def __init__(self, archive: ArchiveInfo, target: Path, returncode: int | None, output: str):
         self.archive = archive
         self.target = target
         self.returncode = returncode
@@ -50,11 +51,15 @@ def find_extractor() -> Path | None:
     return None
 
 
+# "3.1.1-13_10_2026-11_12_01.RAR", "19.2.4.11 - 15-10-2026 12_12_31.RAR" e, no Practice,
+# "[19.1000.1] - Inconformidades - 10-10-2026 00_09_50.RAR" ou "[19.1300.1] Exportacao - ....RAR".
+_CASE_ID_RE = re.compile(r"^\s*\[\s*(\d+(?:\.\d+)*)\s*\]|^\s*(\d+(?:\.\d+)*)\s*(?:-|$)")
+
+
 def extract_case_id(name: str) -> tuple[str, bool]:
-    prefix = Path(name).stem.split("-", 1)[0].strip()
-    parts = prefix.split(".")
-    if parts and all(part.isdigit() for part in parts):
-        return prefix, True
+    match = _CASE_ID_RE.match(Path(name).stem)
+    if match:
+        return match.group(1) or match.group(2), True
     return "ID invalido", False
 
 
@@ -90,9 +95,13 @@ def extract_archive(archive: ArchiveInfo, analysis_dir: Path, extractor: Path | 
         shutil.rmtree(target)
     target.mkdir(parents=True, exist_ok=True)
 
-    if archive.extensao == ".zip":
-        with zipfile.ZipFile(archive.path) as zf:
-            zf.extractall(target)
+    # Pelo conteudo, nao pela extensao: ha VM que grava ZIP com nome .RAR (o UnRAR diz "danificado").
+    if archive.extensao == ".zip" or zipfile.is_zipfile(archive.path):
+        try:
+            with zipfile.ZipFile(archive.path) as zf:
+                zf.extractall(target)
+        except (zipfile.BadZipFile, OSError) as exc:
+            raise ArchiveExtractionError(archive, target, None, str(exc)) from exc
         return target
 
     if extractor is None:

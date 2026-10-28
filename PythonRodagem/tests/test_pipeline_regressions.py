@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
+from agent_tc_core.api_repository import LocalPayloadRepository
 from agent_tc_core.api_server import AgentTcApi
 from agent_tc_core.config import RunContext, parse_run_context
 from agent_tc_core.constants import STATUS_QUEBRA
@@ -388,15 +390,113 @@ class PipelineRegressionTests(unittest.TestCase):
                     "vm_name": "a08",
                     "version": "PROXIMA",
                     "casos_teste": "[3]",
-                    "status": "finalizado",
                 },
             )
+            # O estado final e gravado pelo JenkinsBridge, nunca pelo dashboard.
+            conn = repository.connect()
+            try:
+                conn.execute("UPDATE rerun_requests SET status = 'finalizado' WHERE id = 'rerun-2'")
+                conn.commit()
+            finally:
+                conn.close()
 
             status, payload = api.route_post("/rerun-requests/rerun-2/cancel", {})
 
             self.assertEqual(409, status)
             self.assertFalse(payload["ok"])
             self.assertEqual("rerun_request_not_cancellable", payload["error"])
+
+    def test_new_rerun_request_ignores_status_from_dashboard(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            repository = SQLiteRepository(Path(temp_dir) / "agent-tc.sqlite")
+            api = AgentTcApi(Path(temp_dir), repository=repository, require_user_auth=False)
+
+            status, created = api.route_post(
+                "/rerun-requests",
+                {"vm_name": "a08", "version": "PROXIMA", "casos_teste": "[3]", "status": "finalizado"},
+            )
+            self.assertEqual(201, status)
+            self.assertEqual("requested", created["status"])
+
+            status, created = api.route_post(
+                "/rerun-requests",
+                {"vm_name": "a08", "version": "PROXIMA", "casos_teste": "[3]", "status": "solicitado"},
+            )
+            self.assertEqual(201, status)
+            self.assertEqual("solicitado", created["status"])
+
+    def test_rerun_request_cannot_overwrite_existing_id(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            repository = SQLiteRepository(Path(temp_dir) / "agent-tc.sqlite")
+            api = AgentTcApi(Path(temp_dir), repository=repository, require_user_auth=False)
+            original = {"id": "rerun-3", "vm_name": "a08", "version": "PROXIMA", "casos_teste": "[3]"}
+            status, _ = api.route_post("/rerun-requests", original)
+            self.assertEqual(201, status)
+
+            status, payload = api.route_post(
+                "/rerun-requests",
+                {"id": "rerun-3", "vm_name": "a99", "version": "OUTRA", "casos_teste": "[9]"},
+            )
+
+            self.assertEqual(409, status)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("rerun_request_already_exists", payload["error"])
+            stored = [row for row in repository.rerun_requests() if row["id"] == "rerun-3"]
+            self.assertEqual("a08", stored[0]["vm_name"])
+
+    def test_canonical_rerun_request_cannot_overwrite_existing_id(self):
+        repository = _InMemoryCanonicalRerunRepository()
+        created = repository.record_rerun_request({"id": "rerun-4", "vm_name": "a08", "status": "finalizado"})
+        self.assertEqual("requested", created["status"])
+
+        result = repository.record_rerun_request({"id": "rerun-4", "vm_name": "a99"})
+
+        self.assertEqual("rerun_request_already_exists", result["error"])
+        self.assertEqual("a08", repository.rows["rerun-4"]["vm_name"])
+
+    def test_local_payload_repository_reads_payloads_and_records_requests(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            root = Path(temp_dir)
+            report_dir = root / "shadow_reports_rod_1"
+            report_dir.mkdir()
+            (report_dir / "shadow_payload.json").write_text(
+                json.dumps(
+                    {
+                        "rodagem": {"id_rodagem": "rod_1", "data_inicio": "2026-07-09T20:54:37-03:00"},
+                        "modulo": {"id_modulo": "mod_contabil", "nome": "Contabil"},
+                        "falhas": [{"id_falha": "f1"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            repository = LocalPayloadRepository(root)
+
+            runs = repository.runs()
+            self.assertEqual(["rod_1"], [run["id_rodagem"] for run in runs])
+            self.assertEqual("contabil", runs[0]["modulo_slug"])
+            self.assertEqual(1, runs[0]["falhas_count"])
+
+            created = repository.record_rerun_request({"vm_name": "a08"})
+            self.assertEqual("solicitado_local", created["status"])
+            self.assertEqual([created["id"]], [row["id"] for row in repository.rerun_requests()])
+
+
+class _InMemoryCanonicalRerunRepository(CanonicalRepository):
+    def __init__(self):
+        self.rows: dict[str, dict] = {}
+        self.plan = {"upserts": {}, "deduplicated_rows": {}}
+        self.dry_run = False
+        self.table_prefix = ""
+
+    def _rest_json(self, method, path, body=None, *, query=None, extra_headers=None):
+        if method == "GET":
+            request_id = (query or {}).get("id", "").removeprefix("eq.")
+            return [dict(self.rows[request_id])] if request_id in self.rows else []
+        if method == "POST":
+            for row in body:
+                self.rows[row["id"]] = dict(row)
+            return None
+        raise NotImplementedError(method)
 
 
 def _payload_with_repeated_case():

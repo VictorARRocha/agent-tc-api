@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .auth import AuthenticationError
+from .permissions import invalid_modules, invalid_permissions, normalize_modules, normalize_permissions
 
 
 PASSWORD_ALGORITHM = "pbkdf2_sha256"
@@ -45,6 +46,10 @@ class LocalAuthService:
             raise LocalAuthError("Senha deve ter pelo menos 8 caracteres.", error="invalid_password")
         if self.repository.auth_user_by_username(username):
             raise LocalAuthError("Usuario ja cadastrado.", error="username_already_exists", status=409)
+        requested_modules = data.get("modules", [])
+        invalid = invalid_modules(requested_modules)
+        if invalid is None or invalid:
+            raise LocalAuthError("Modulos invalidos.", error="invalid_modules")
 
         first_user = self.repository.auth_user_count() == 0
         now = now_iso()
@@ -58,6 +63,10 @@ class LocalAuthService:
             "email": _nullable_text(data.get("email")) or f"{username}@agent-tc.local",
             "role": "admin" if first_user else "user",
             "status": "approved" if first_user else "pending",
+            # Novo usuario so ve rodagens; o admin libera as acoes na tela de usuarios.
+            "permissions": [],
+            # Modulos pedidos no cadastro; o primeiro usuario (admin) fica com todos.
+            "modules": ["*"] if first_user else normalize_modules(requested_modules),
             "password_hash": hash_password(password),
             "password_updated_at": now,
             "must_change_password": False,
@@ -82,6 +91,10 @@ class LocalAuthService:
         user = self.repository.auth_user_by_username(normalized)
         if not user or not user.get("password_hash"):
             raise LocalAuthError("Usuario ou senha invalidos.", error="invalid_credentials", status=401)
+        # O bloqueio e verificado antes da senha: a resposta durante o bloqueio
+        # nao pode depender de a senha estar certa ou errada.
+        if _is_future(user.get("locked_until")):
+            raise LocalAuthError("Usuario temporariamente bloqueado.", error="user_locked", status=423)
         if not verify_password(password, str(user.get("password_hash") or "")):
             self._record_failed_login(user)
             raise LocalAuthError("Usuario ou senha invalidos.", error="invalid_credentials", status=401)
@@ -91,8 +104,6 @@ class LocalAuthService:
                 error="user_not_approved",
                 status=403,
             )
-        if _is_future(user.get("locked_until")):
-            raise LocalAuthError("Usuario temporariamente bloqueado.", error="user_locked", status=423)
 
         now = now_dt()
         token = secrets.token_urlsafe(32)
@@ -134,7 +145,15 @@ class LocalAuthService:
         user = self.repository.auth_user_by_id(str(session.get("user_id") or ""))
         if not user or user.get("status") != "approved":
             raise AuthenticationError("Usuario sem acesso")
-        return {"id": user["id"], "email": user.get("email"), "username": user.get("username"), "role": user.get("role"), "user": public_user(user)}
+        return {
+            "id": user["id"],
+            "email": user.get("email"),
+            "username": user.get("username"),
+            "role": user.get("role"),
+            "permissions": normalize_permissions(user.get("permissions")),
+            "modules": normalize_modules(user.get("modules")),
+            "user": public_user(user),
+        }
 
     def current_user_response(self, authorization: str | None) -> dict[str, Any]:
         identity = self.validate(authorization)
@@ -158,6 +177,16 @@ class LocalAuthService:
             if role not in {"user", "admin"}:
                 raise LocalAuthError("Role invalida.", error="invalid_role")
             fields["role"] = role
+        if "permissions" in data:
+            invalid = invalid_permissions(data.get("permissions"))
+            if invalid is None or invalid:
+                raise LocalAuthError("Permissoes invalidas.", error="invalid_permissions")
+            fields["permissions"] = normalize_permissions(data.get("permissions"))
+        if "modules" in data:
+            invalid = invalid_modules(data.get("modules"))
+            if invalid is None or invalid:
+                raise LocalAuthError("Modulos invalidos.", error="invalid_modules")
+            fields["modules"] = normalize_modules(data.get("modules"))
         if "status" in data:
             status = str(data.get("status") or "")
             if status not in {"pending", "approved", "rejected", "disabled"}:
@@ -203,8 +232,14 @@ class LocalAuthService:
         return user
 
     def _record_failed_login(self, user: dict[str, Any]) -> None:
-        attempts = int(user.get("failed_login_attempts") or 0) + 1
-        fields: dict[str, Any] = {"failed_login_attempts": attempts, "updated_at": now_iso()}
+        attempts = int(user.get("failed_login_attempts") or 0)
+        fields: dict[str, Any] = {"updated_at": now_iso()}
+        if user.get("locked_until") and not _is_future(user.get("locked_until")):
+            # Bloqueio anterior ja expirou: recomeca a contagem.
+            attempts = 0
+            fields["locked_until"] = None
+        attempts += 1
+        fields["failed_login_attempts"] = attempts
         if attempts >= 10:
             fields["locked_until"] = (now_dt() + timedelta(minutes=15)).isoformat(timespec="seconds")
         self.repository.auth_update_user(user["id"], fields)
@@ -278,7 +313,11 @@ def public_user(row: dict[str, Any], *, admin_view: bool = False) -> dict[str, A
     }
     if admin_view:
         allowed.update({"approved_by", "rejected_by", "disabled_by", "locked_until", "failed_login_attempts"})
-    return {key: row.get(key) for key in allowed if key in row}
+    public = {key: row.get(key) for key in allowed if key in row}
+    # Sempre presente (lista vazia se o usuario ainda nao tem nenhuma).
+    public["permissions"] = normalize_permissions(row.get("permissions"))
+    public["modules"] = normalize_modules(row.get("modules"))
+    return public
 
 
 def public_session(row: dict[str, Any]) -> dict[str, Any]:
